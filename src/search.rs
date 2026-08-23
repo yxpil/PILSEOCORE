@@ -221,13 +221,14 @@ impl SearchEngine {
             }
         }
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        drop(idx);
 
         // ---- 同标题折叠:相同标题(去域名后缀)只保留最高分,fold_count = 组大小 ----
+        // 注意:全程持有 idx 锁,禁止二次 lock(rebuild 并发替换索引会导致
+        // 旧 blocks 的 doc_id 访问新 docs 越界)
         let mut groups: Vec<(SearchHit, usize)> = Vec::new(); // (组内最佳, 组大小)
         let mut seen: HashMap<String, usize> = HashMap::new(); // fold_key -> groups 下标
         for (doc_id, score) in scored {
-            let doc = &self.index.lock().unwrap().docs[doc_id];
+            let doc = &idx.docs[doc_id];
             let key = fold_key(&doc.title, &doc.domain);
             if let Some(&gi) = seen.get(&key) {
                 groups[gi].1 += 1;
