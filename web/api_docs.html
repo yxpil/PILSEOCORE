@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -81,7 +81,7 @@ DELETE /api/admin/tokens/&lt;id&gt;          # 撤销</pre>
 <p>扫描在后台运行,完成后自动重建索引;通过 <code>/api/admin/scan-status</code> 轮询进度。</p>
 
 <h2>基础信息</h2>
-<p>服务地址: <code>http://127.0.0.1:8891</code>(可在 <code>config/engine.conf</code> 修改 <code>server_port</code>)</p>
+<p>服务地址: <code>http://127.0.0.1:8896</code>(固定端口,在 <code>config/engine.conf</code> 的 <code>server_port</code> 配置)</p>
 
 <h2>接口总览</h2>
 <table>
@@ -171,7 +171,7 @@ ai_model = qwen3:8b
 <p>工具列表: <code>search</code> / <code>suggest</code> / <code>status</code> / <code>sitemap</code> / <code>rebuild</code></p>
 
 <h2>命令行</h2>
-<pre>pilseocore serve [--port 8891]   # 启动搜索服务(自动加载/重建索引)
+<pre>pilseocore serve [--port 8896]   # 启动搜索服务(自动加载/重建索引)
 pilseocore index                 # 手动重建索引
 pilseocore search "关键词"        # CLI 搜索
 pilseocore mcp                   # MCP Server(stdio)</pre>

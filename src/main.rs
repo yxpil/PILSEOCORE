@@ -1,4 +1,4 @@
-//! PILSEOCORE —— SEO 自动域名穷举引擎 + 本地搜索引擎
+﻿//! PILSEOCORE —— SEO 自动域名穷举引擎 + 本地搜索引擎
 //!
 //! 子命令:
 //!   (默认)             穷举模式:字符集穷举 x 后缀大全 x 多DNS并发解析 x 自动建站
@@ -37,14 +37,14 @@ fn usage() {
              [--charset <s>] [--dry-run] [--no-sites] [--check <域名>]
 
 本地搜索引擎:
-  pilseocore serve [--port 8891]   启动搜索服务(Web UI + API + 自动索引)
+  pilseocore serve [--port 8896]   启动搜索服务(Web UI + API + 自动索引)
   pilseocore index                 重建索引(扫描站点,生成 sitemap.xml)
   pilseocore search "关键词"        CLI 搜索
   pilseocore mcp                    MCP Server(stdio)
 
 示例:
   pilseocore --max-len 2 --workers 128    # 穷举 2 位域名
-  pilseocore serve --port 8891            # 启动搜索引擎
+  pilseocore serve --port 8896            # 启动搜索引擎
   pilseocore search 智能家居              # 搜索
 "#
     );

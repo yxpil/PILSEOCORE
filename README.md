@@ -1,4 +1,4 @@
-# PILSEOCORE
+﻿# PILSEOCORE
 
 本地想自己建立搜索引擎？那么一个暴力的搜索全网编制的多线程SEO模块，你可能需要
 
@@ -42,7 +42,7 @@ pilseocore --check 1.com                    # 单域名探测注册状态
 
 # ---- 本地搜索引擎 ----
 pilseocore index                            # 扫描站点建索引 + 生成 sitemap.xml
-pilseocore serve --port 8891                # 启动搜索引擎(浏览器打开 http://127.0.0.1:8891)
+pilseocore serve --port 8896                # 启动搜索引擎(浏览器打开 http://127.0.0.1:8896)
 pilseocore search "智能家居"                # CLI 搜索
 pilseocore mcp                              # MCP Server(stdio)
 ```
@@ -61,18 +61,18 @@ pilseocore mcp                              # MCP Server(stdio)
 
 ```bash
 # 1) 登录拿会话 token
-curl -X POST http://127.0.0.1:8891/api/auth/login \
+curl -X POST http://127.0.0.1:8896/api/auth/login \
   -H "Content-Type: application/json" -d '{"username":"admin","password":"你的密码"}'
 # => {"token":"<会话token>",...}
 
 # 2) 签发 API/MCP token
-curl -X POST http://127.0.0.1:8891/api/admin/tokens \
+curl -X POST http://127.0.0.1:8896/api/admin/tokens \
   -H "Authorization: Bearer <会话token>" -H "Content-Type: application/json" \
   -d '{"name":"mcp-server"}'
 # => {"token":"<完整token,仅此一次>",...}
 
 # 3) 用签发 token 调用管理 API
-curl -X POST http://127.0.0.1:8891/api/admin/scan \
+curl -X POST http://127.0.0.1:8896/api/admin/scan \
   -H "Authorization: Bearer <签发token>" -H "Content-Type: application/json" \
   -d '{"max_len":2,"workers":64}'
 
@@ -96,7 +96,7 @@ pilseocore mcp --token <签发token>
 | `qtypes` | 探测记录类型 | `A AAAA NS` |
 | `block_file` | 黑名单 | `config/back.list` |
 | `build_sites` | 自动建站 | `true` |
-| `server_port` | 搜索服务端口 | `8891` |
+| `server_port` | 搜索服务端口 | `8896` |
 | `hot_cache_size` / `hot_cache_ttl` | 热点缓存容量/TTL | `1000` / `60` |
 | `ai_enabled` | AI 摘要开关 | `false` |
 | `ai_endpoint` / `ai_model` | AI 端点/模型 | 本地 llama-server |

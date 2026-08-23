@@ -48,7 +48,7 @@ impl Default for Config {
             qtypes: vec![1, 28, 2], // A AAAA NS
             out_dir: "out".into(),
             build_sites: true,
-            server_port: 8891,
+            server_port: 8896,
             hot_cache_size: 1000,
             hot_cache_ttl: 60,
             ai_enabled: false,
