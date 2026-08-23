@@ -42,6 +42,8 @@ pub struct SearchEngine {
     pub cache_misses: Mutex<u64>,
     /// 索引构建进度(管理面板实时显示)
     index_state: Arc<Mutex<crate::index::IndexState>>,
+    /// 重建互斥:同一时刻只允许一个 rebuild(定时任务与手动触发并发会互相踩状态)
+    rebuilding: std::sync::atomic::AtomicBool,
 }
 
 struct HotCache {
@@ -93,7 +95,13 @@ impl SearchEngine {
             cache_hits: Mutex::new(0),
             cache_misses: Mutex::new(0),
             index_state: Arc::new(Mutex::new(crate::index::IndexState::default())),
+            rebuilding: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// 是否正在重建索引
+    pub fn is_rebuilding(&self) -> bool {
+        self.rebuilding.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// 索引构建进度状态(管理面板实时查询)
@@ -107,14 +115,22 @@ impl SearchEngine {
 
     /// 重建索引(全量),返回站点数;内容重复/雷同域名自动拉黑
     /// 进度实时写入 index_state(管理面板进度条)
+    /// 并发保护:已有重建进行中时返回 Err(定时任务与手动触发冲突时跳过)
     pub fn rebuild(&self, sites_dir: &std::path::Path, data_dir: &std::path::Path) -> Result<usize, String> {
-        let idx = SiteIndex::build_with_progress(sites_dir, data_dir, &self.blacklist, Some(&self.index_state))?;
-        let n = idx.docs.len();
-        *self.index.lock().unwrap() = idx;
-        let mut cache = self.hot_cache.lock().unwrap();
-        cache.map.clear();
-        cache.order.clear();
-        Ok(n)
+        if self.rebuilding.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Err("已有索引重建在进行中,本次跳过".into());
+        }
+        let result = (|| {
+            let idx = SiteIndex::build_with_progress(sites_dir, data_dir, &self.blacklist, Some(&self.index_state))?;
+            let n = idx.docs.len();
+            *self.index.lock().unwrap() = idx;
+            let mut cache = self.hot_cache.lock().unwrap();
+            cache.map.clear();
+            cache.order.clear();
+            Ok(n)
+        })();
+        self.rebuilding.store(false, std::sync::atomic::Ordering::SeqCst);
+        result
     }
 
     /// 搜索(分页):返回 (总组数, 当前页结果)

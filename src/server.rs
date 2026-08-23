@@ -949,7 +949,7 @@ fn run_task(ctx: &Arc<ServerCtx>, task: &crate::tasks::Task) {
             {
                 let mut scan = ctx.scan.lock().unwrap();
                 if scan.running {
-                    println!("[task] 扫描任务跳过(已有扫描在运行)");
+                    crate::logger::push("[task] 定时扫描跳过(已有扫描在运行)");
                     return;
                 }
                 *scan = ScanState::default();
@@ -958,13 +958,12 @@ fn run_task(ctx: &Arc<ServerCtx>, task: &crate::tasks::Task) {
                 scan.max_len = max_len;
             }
             start_scan_thread(ctx, 1, max_len, workers);
-            println!("[task] 定时扫描启动: max_len={} workers={}", max_len, workers);
+            crate::logger::push(format!("[task] 定时扫描启动: max_len={} workers={}", max_len, workers));
         }
         "rebuild" => {
-            println!("[task] 定时重建索引...");
             match ctx.engine.rebuild(&crate::config::sites_dir(), &crate::config::index_dir()) {
-                Ok(n) => println!("[task] 重建完成: {} 站点", n),
-                Err(e) => println!("[task] 重建失败: {}", e),
+                Ok(n) => crate::logger::push(format!("[task] 定时重建完成: {} 站点", n)),
+                Err(e) => crate::logger::push(format!("[task] 定时重建跳过/失败: {}", e)),
             }
         }
         "crawl" => {
@@ -973,13 +972,16 @@ fn run_task(ctx: &Arc<ServerCtx>, task: &crate::tasks::Task) {
                 .map(|text| text.lines().map(|l| format!("http://{}/", l.trim())).filter(|s| s.len() > 8).collect())
                 .unwrap_or_default();
             if seeds.is_empty() {
-                println!("[task] 定时爬虫跳过(无种子,先重建索引发现外链)");
+                crate::logger::push("[task] 定时爬虫跳过(无种子,先重建索引发现外链)");
             } else {
                 let crawled_dir = crawl_out_dir();
                 let stats = ctx.crawler.crawl(&seeds, &crawled_dir);
-                println!("[task] 爬虫完成: 抓取 {} 发现 {} 失败 {} ({:.0}s)", stats.fetched, stats.discovered, stats.failed, stats.elapsed_secs);
+                crate::logger::push(format!("[task] 定时爬虫完成: 抓取 {} 发现 {} 失败 {} ({:.0}s)", stats.fetched, stats.discovered, stats.failed, stats.elapsed_secs));
                 // 爬完重建索引收录新站
-                let _ = ctx.engine.rebuild(&crate::config::sites_dir(), &crate::config::index_dir());
+                match ctx.engine.rebuild(&crate::config::sites_dir(), &crate::config::index_dir()) {
+                    Ok(n) => crate::logger::push(format!("[task] 爬虫后重建完成: {} 站", n)),
+                    Err(e) => crate::logger::push(format!("[task] 爬虫后重建跳过: {}", e)),
+                }
             }
         }
         _ => {}
@@ -997,6 +999,8 @@ pub fn spawn_scheduler(ctx: &Arc<ServerCtx>) {
             continue;
         }
         for task in due {
+            // 触发时立即标记运行,防止长任务(rebuild 数分钟)期间重复触发
+            ctx_sched.tasks.mark_run(&task.id);
             let ctx_task = ctx_sched.clone();
             std::thread::spawn(move || run_task(&ctx_task, &task));
         }
@@ -1205,10 +1209,17 @@ fn admin_config_save(_ctx: &ServerCtx, req: &Request, kind: &str) -> Response {
 }
 
 fn admin_rebuild(ctx: &ServerCtx) -> Response {
-    crate::logger::push("[admin] 重建索引开始...".to_string());
+    if ctx.engine.is_rebuilding() {
+        crate::logger::push("[admin] 重建请求跳过(已有重建进行中)");
+        return Response::json(409, r#"{"status":"skipped","message":"已有索引重建在进行中,本次跳过"}"#);
+    }
+    crate::logger::push("[admin] 重建索引开始...");
     match ctx.engine.rebuild(&crate::config::sites_dir(), &crate::config::index_dir()) {
         Ok(n) => Response::json(200, &Json::build(vec![("status", Json::str("ok")), ("sites", Json::num(n as f64))]).to_string()),
-        Err(e) => Response::json(500, &Json::build(vec![("status", Json::str("error")), ("message", Json::str(&e))]).to_string()),
+        Err(e) => {
+            crate::logger::push(format!("[admin] 重建失败: {}", e));
+            Response::json(500, &Json::build(vec![("status", Json::str("error")), ("message", Json::str(&e))]).to_string())
+        }
     }
 }
 

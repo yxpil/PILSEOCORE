@@ -296,9 +296,10 @@ fn worker_loop(
             }
             *cnt += 1;
         }
-        // robots 检查(明确禁止的站点不编入)
+        // robots 检查(明确禁止的站点不编入,日志显示跳过)
         if !robots_ok(&robots, &domain, &url, timeout_ms) {
             stats.lock().unwrap().skipped_robots += 1;
+            crate::logger::push(format!("[crawler] robots 禁止,跳过: {}", url));
             continue;
         }
         // 抓取

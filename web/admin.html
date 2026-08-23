@@ -336,18 +336,25 @@ function doLogin() {
 }
 
 /* ============ 视图切换 ============ */
+/* ============ 视图切换 + 主动轮询(不依赖手动操作) ============ */
+var viewTimers = {};
+function ensureTimer(name, fn, ms) {
+  if (!viewTimers[name]) viewTimers[name] = setInterval(fn, ms);
+}
+var dupPage = 1;
+
 function switchView(v) {
-  document.querySelectorAll('.nav-item').forEach(function(n){ n.classList.toggle('active', n.dataset.view === v); });
+  document.querySelectorAll('.nav-item').forEach(function(n){ n.classList.toggle('active', n.getAttribute('data-view') === v); });
   document.querySelectorAll('.view').forEach(function(s){ s.classList.toggle('active', s.id === 'view-' + v); });
   if (v === 'config') loadConfigs();
   if (v === 'tokens') loadTokens();
-  if (v === 'blacklist') loadBlacklist(1);
-  if (v === 'crawl') pollCrawl();
-  if (v === 'tasks') loadTasks();
-  if (v === 'duplicates') loadDuplicates(1);
-  if (v === 'stats') loadStats();
-  if (v === 'overview') { loadOverview(); pollScan(); pollIndexStatus(); if (!logTimer) { logTimer = setInterval(pollLogs, 1500); pollLogs(); } }
-  if (v === 'scan') pollScan();
+  if (v === 'blacklist') { loadBlacklist(1); ensureTimer('blacklist', function(){ loadBlacklist(blPage || 1); }, 30000); }
+  if (v === 'crawl') { pollCrawl(); ensureTimer('crawl', pollCrawl, 2000); }
+  if (v === 'tasks') { loadTasks(); ensureTimer('tasks', loadTasks, 10000); }
+  if (v === 'duplicates') { loadDuplicates(dupPage); ensureTimer('dup', function(){ loadDuplicates(dupPage); }, 30000); }
+  if (v === 'stats') { loadStats(); ensureTimer('stats', loadStats, 10000); }
+  if (v === 'overview') { loadOverview(); pollScan(); pollIndexStatus(); ensureTimer('idx', pollIndexStatus, 2000); if (!logTimer) { logTimer = setInterval(pollLogs, 1500); pollLogs(); } }
+  if (v === 'scan') { pollScan(); ensureTimer('scan', pollScan, 3000); }
 }
 
 /* ============ 概览 ============ */
@@ -553,6 +560,7 @@ function removeTask(id) {
 var dupChecked = {};
 function loadDuplicates(page) {
   page = page || 1;
+  dupPage = page;
   dupChecked = {};
   adminFetch('/api/admin/duplicates?page=' + page + '&limit=20').then(function(r){ return r.json(); }).then(function(d){
     var groups = d.groups || [];
@@ -674,8 +682,10 @@ function pollLogs() {
 }
 
 /* ============ 黑名单 ============ */
+var blPage = 1;
 function loadBlacklist(page) {
   page = page || 1;
+  blPage = page;
   adminFetch('/api/admin/blacklist?page=' + page + '&limit=50').then(function(r){ return r.json(); }).then(function(d){
     var list = d.blacklist || [];
     var el = document.getElementById('blList');
