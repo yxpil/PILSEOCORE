@@ -57,6 +57,7 @@ pub struct ScanState {
     pub sites: u64,
     pub elapsed_secs: f64,
     pub max_len: usize,
+    pub grand_total: u128,
 }
 
 impl Default for ScanState {
@@ -75,6 +76,7 @@ impl Default for ScanState {
             sites: 0,
             elapsed_secs: 0.0,
             max_len: 0,
+            grand_total: 0,
         }
     }
 }
@@ -401,6 +403,7 @@ fn scan_state_json(s: &ScanState) -> Json {
         ("started_ts", Json::num(s.started_ts as f64)),
         ("finished_ts", Json::num(s.finished_ts as f64)),
         ("max_len", Json::num(s.max_len as f64)),
+        ("grand_total", Json::str(s.grand_total.to_string())),
         ("total", Json::num(s.total as f64)),
         ("registered", Json::num(s.registered as f64)),
         ("available", Json::num(s.available as f64)),
@@ -441,8 +444,8 @@ fn admin_scan(ctx: &ServerCtx, req: &Request) -> Response {
         .get("max_len")
         .and_then(|v| v.as_u64())
         .map(|v| v as usize)
-        .filter(|v| (1..=6).contains(v))
-        .ok_or_json("参数 max_len 缺失或非法(范围 1-6)");
+        .filter(|v| (1..=20).contains(v))
+        .ok_or_json("参数 max_len 缺失或非法(范围 1-20)");
     let max_len = match max_len {
         Ok(v) => v,
         Err(resp) => return resp,
@@ -470,7 +473,7 @@ fn admin_scan(ctx: &ServerCtx, req: &Request) -> Response {
     let engine = ctx.engine.clone();
     let scan_state = ctx.scan.clone();
     std::thread::spawn(move || {
-        let result = run_scan_job(engine.clone(), min_len, max_len, workers);
+        let result = run_scan_job(engine.clone(), scan_state.clone(), min_len, max_len, workers);
         let mut s = scan_state.lock().unwrap();
         s.running = false;
         s.finished = true;
@@ -497,6 +500,7 @@ fn admin_scan(ctx: &ServerCtx, req: &Request) -> Response {
 /// 在后台线程执行穷举扫描(独立读配置,仅覆盖 min/max_len 与 workers)
 fn run_scan_job(
     _engine: Arc<SearchEngine>,
+    scan_state: Arc<Mutex<ScanState>>,
     min_len: usize,
     max_len: usize,
     workers: usize,
@@ -507,7 +511,22 @@ fn run_scan_job(
     cfg.workers = workers;
     println!("[admin] 管理员触发穷举: 位数=[{},{}] workers={}", min_len, max_len, workers);
     let eng = crate::engine::Engine::load(cfg)?;
-    let stats = eng.run(false)?;
+    // 设置任务总数(供进度条百分比)
+    {
+        let mut s = scan_state.lock().unwrap();
+        s.grand_total = eng.grand_total();
+    }
+    // 进度回调:周期性把统计写入共享状态(Web UI 轮询展示)
+    let mut progress = |st: &crate::engine::Stats| {
+        let mut s = scan_state.lock().unwrap();
+        s.total = st.total;
+        s.registered = st.registered;
+        s.available = st.available;
+        s.errors = st.errors;
+        s.skipped = st.skipped;
+        s.sites = st.sites;
+    };
+    let stats = eng.run(false, Some(&mut progress))?;
     println!(
         "[admin] 穷举完成: 总数={} 可用={} 已注册={} 失败={} 建站={}",
         stats.total, stats.available, stats.registered, stats.errors, stats.sites

@@ -157,7 +157,7 @@ fn cmd_enumerate(args: &[String]) -> Result<(), String> {
     if dry_run {
         println!("[信息] 干跑模式:不查询 DNS,仅验证穷举顺序");
     }
-    let stats = engine.run(dry_run)?;
+    let stats = engine.run(dry_run, None)?;
     println!("\n===== 完成 ===== 耗时 {:.1}s", stats.elapsed);
     println!("穷举总数    : {}", stats.total);
     println!("已注册      : {}", stats.registered);

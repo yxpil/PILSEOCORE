@@ -72,7 +72,7 @@ DELETE /api/admin/tokens/&lt;id&gt;          # 撤销</pre>
 <h3>触发穷举 <span class="tag">POST</span> <code>/api/admin/scan</code></h3>
 <h3>请求体</h3>
 <pre>{
-  "max_len": 2,       // 穷举到的最大位数(必填,1-6)
+  "max_len": 2,       // 穷举到的最大位数(必填,1-20)
   "min_len": 1,       // 起始位数(可选,默认 1)
   "workers": 64       // 并发数(可选,1-512)
 }</pre>

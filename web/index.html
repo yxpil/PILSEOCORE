@@ -77,6 +77,8 @@
   .modal .msg.warn { color:#b06000; }
   .scan-state { background:#f8f9fa; border:1px solid var(--line); border-radius:8px; padding:12px 16px; font-size:13px; margin-top:12px; display:none; }
   .scan-state b { color:var(--blue); }
+  .bar-wrap { background:#f1f3f4; border-radius:8px; height:8px; overflow:hidden; margin-bottom:8px; }
+  .bar { background:var(--blue); height:100%; width:0%; transition:width .3s ease; }
 
   footer { color:var(--gray); font-size:12px; text-align:center; padding:24px; }
 </style>
@@ -127,12 +129,15 @@
     <div id="panelBox" style="display:none">
       <label>穷举遍历(从 1 位穷举到指定位数)</label>
       <div class="row">
-        <div><label style="margin-top:0">最大位数</label><input type="number" id="scanMaxLen" value="2" min="1" max="6"></div>
+        <div><label style="margin-top:0">最大位数</label><input type="number" id="scanMaxLen" value="2" min="1" max="20"></div>
         <div><label style="margin-top:0">并发数</label><input type="number" id="scanWorkers" value="64" min="1" max="512"></div>
       </div>
       <button class="btn" id="scanBtn" onclick="startScan()">开始穷举遍历</button>
       <button class="btn secondary" onclick="rebuildIndex()">重建索引</button>
-      <div class="scan-state" id="scanState"></div>
+      <div class="scan-state" id="scanState">
+        <div class="bar-wrap"><div class="bar" id="scanBar"></div></div>
+        <div id="scanText"></div>
+      </div>
 
       <label>域名后缀列表(空格分隔,按此顺序遍历)</label>
       <textarea id="tldEdit"></textarea>
@@ -382,7 +387,7 @@ function revokeToken(id) {
 function startScan() {
   var maxLen = parseInt(document.getElementById('scanMaxLen').value, 10) || 2;
   var workers = parseInt(document.getElementById('scanWorkers').value, 10) || 64;
-  if (maxLen < 1 || maxLen > 6) { setMsg('adminMsg', '最大位数范围 1-6', 'err'); return; }
+  if (maxLen < 1 || maxLen > 20) { setMsg('adminMsg', '最大位数范围 1-20', 'err'); return; }
   setMsg('adminMsg', '正在启动穷举遍历(位数 ' + maxLen + ',并发 ' + workers + ')...', 'warn');
   adminFetch('/api/admin/scan', {
     method: 'POST',
@@ -402,19 +407,27 @@ function startScan() {
 function pollScan() {
   adminFetch('/api/admin/scan-status').then(function(r){ return r.json(); }).then(function(s){
     var el = document.getElementById('scanState');
-    el.style.display = 'block';
+    var txt = document.getElementById('scanText');
+    var bar = document.getElementById('scanBar');
     var btn = document.getElementById('scanBtn');
+    el.style.display = 'block';
+    var gtStr = s.grand_total || '0';
+    var gt = parseFloat(gtStr) || 0;
+    var pct = gt > 0 ? Math.min(100, Math.round(s.total / gt * 100)) : 0;
+    bar.style.width = pct + '%';
     if (s.running) {
       btn.disabled = true;
-      el.innerHTML = '<b>扫描中...</b> 已处理 ' + s.total + ' 个域名 · 可用=' + s.available + ' · 已注册=' + s.registered + ' · 失败=' + s.errors + ' · 建站=' + s.sites;
+      txt.innerHTML = '<b>扫描中...</b> 已处理 ' + s.total + ' / ' + gtStr + ' (' + pct + '%) · 可用=' + s.available + ' · 已注册=' + s.registered + ' · 失败=' + s.errors + ' · 建站=' + s.sites;
     } else {
       btn.disabled = false;
       if (s.finished) {
+        bar.style.width = '100%';
         var line = '<b>上次扫描完成</b> 总数=' + s.total + ' · 可用=' + s.available + ' · 已注册=' + s.registered + ' · 失败=' + s.errors + ' · 建站=' + s.sites + ' · 耗时=' + s.elapsed_secs + 's';
         if (s.error) line += '<br>错误: ' + esc(s.error);
-        el.innerHTML = line;
+        txt.innerHTML = line;
       } else {
-        el.innerHTML = '暂无扫描记录';
+        bar.style.width = '0%';
+        txt.innerHTML = '暂无扫描记录';
       }
     }
   }).catch(function(){});

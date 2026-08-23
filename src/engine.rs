@@ -146,7 +146,6 @@ impl Engine {
 
     /// 运行参数摘要(供启动时打印)
     pub fn summary(&self) -> String {
-        let en = Enumerator::new(&self.cfg.charset, self.cfg.min_len, self.cfg.max_len);
         format!(
             "字符集={} 位数=[{},{}] 后缀={} DNS={}(每域名查{}) workers={} 穷举域名总数={}",
             self.cfg.charset,
@@ -156,11 +155,18 @@ impl Engine {
             self.dns_servers.len(),
             self.cfg.dns_per_domain,
             self.cfg.workers,
-            en.total().saturating_mul(self.tlds.len() as u128)
+            self.grand_total()
         )
     }
 
-    pub fn run(&self, dry_run: bool) -> Result<Stats, String> {
+    /// 穷举任务总数(字符集组合数 x 后缀数),供进度展示
+    pub fn grand_total(&self) -> u128 {
+        let en = Enumerator::new(&self.cfg.charset, self.cfg.min_len, self.cfg.max_len);
+        en.total().saturating_mul(self.tlds.len() as u128)
+    }
+
+    /// 运行穷举引擎。progress 回调(可选)在运行中周期性收到当前统计,供进度展示
+    pub fn run(&self, dry_run: bool, mut progress: Option<&mut dyn FnMut(&Stats)>) -> Result<Stats, String> {
         if dry_run {
             return self.run_dry();
         }
@@ -257,6 +263,9 @@ impl Engine {
                         stats.sites,
                         start.elapsed().as_secs_f64()
                     );
+                    if let Some(cb) = progress.as_mut() {
+                        cb(&stats);
+                    }
                     last_print = Instant::now();
                 }
             }
