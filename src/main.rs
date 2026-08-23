@@ -7,7 +7,7 @@
 //!   search <关键词>     CLI 搜索
 //!   mcp                启动 MCP Server(stdio,供 AI 客户端调用)
 
-use pilseocore::{ai, auth, blacklist, config, crawler, dns, engine, http, index, mcp, search, server, stats, tasks, tokenizer};
+use pilseocore::{ai, auth, blacklist, config, crawler, dns, engine, http, index, logger, mcp, search, server, stats, tasks, tokenizer};
 
 use std::process::exit;
 use std::sync::Arc;
@@ -266,6 +266,8 @@ fn cmd_serve(args: &[String]) -> Result<(), String> {
     ));
     println!("[tasks] 定时任务调度线程运行中(管理后台'定时任务'可添加)");
     server::spawn_scheduler(&ctx);
+    logger::init();
+    logger::push(format!("[serve] 服务已启动: http://127.0.0.1:{}(端口 8896 固定)", port));
     let addr = format!("127.0.0.1:{}", port);
     http::serve(&addr, move |req| {
         let ctx = ctx.clone();

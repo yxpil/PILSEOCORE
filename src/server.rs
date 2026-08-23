@@ -165,6 +165,8 @@ pub fn handle(ctx: &ServerCtx, req: &Request) -> Response {
         ("POST", "/api/admin/config/dns") => admin_guard(ctx, req, |ctx| admin_config_save(ctx, req, "dns")),
         ("POST", "/api/admin/rebuild") => admin_guard(ctx, req, |ctx| admin_rebuild(ctx)),
         ("POST", "/api/rebuild") => admin_guard(ctx, req, |ctx| admin_rebuild(ctx)), // 旧路径,现需管理员
+        ("GET", "/api/admin/index-status") => admin_guard(ctx, req, |ctx| admin_index_status(ctx)),
+        ("GET", "/api/admin/logs") => admin_guard(ctx, req, |ctx| admin_logs(ctx, req)),
         ("GET", "/api/admin/tokens") => admin_guard(ctx, req, |ctx| admin_tokens_list(ctx)),
         ("POST", "/api/admin/tokens") => admin_guard(ctx, req, |ctx| admin_tokens_create(ctx, req)),
         ("DELETE", "/api/admin/tokens/") => Response::json(400, r#"{"error":"缺少 token id"}"#),
@@ -405,6 +407,46 @@ fn api_logout(ctx: &ServerCtx, req: &Request) -> Response {
 }
 
 // ---------------- Token 管理(管理员签发给 API/MCP) ----------------
+
+/// 索引构建进度(进度条 + 当前站点 + 关键词)
+fn admin_index_status(ctx: &ServerCtx) -> Response {
+    let s = ctx.engine.index_state().lock().unwrap().clone();
+    let keywords: Vec<Json> = s.keywords.iter().map(|k| Json::str(k)).collect();
+    Response::json(
+        200,
+        &Json::build(vec![
+            ("phase", Json::str(&s.phase)),
+            ("processed", Json::num(s.processed as f64)),
+            ("total", Json::num(s.total as f64)),
+            ("current_domain", Json::str(&s.current_domain)),
+            ("keywords", Json::arr(keywords)),
+            ("links_found", Json::num(s.links_found as f64)),
+            ("sites", Json::num(s.sites as f64)),
+            ("dup", Json::num(s.dup as f64)),
+            ("blocked", Json::num(s.blocked as f64)),
+            ("running", Json::Bool(s.running)),
+            ("finished", Json::Bool(s.finished)),
+            ("elapsed_secs", Json::num(s.elapsed_secs)),
+            ("error", Json::str(s.error.as_deref().unwrap_or(""))),
+        ])
+        .to_string(),
+    )
+}
+
+/// 实时日志流(after 增量拉取)
+fn admin_logs(_ctx: &ServerCtx, req: &Request) -> Response {
+    let after = req.param("after").and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+    let (newest, lines) = crate::logger::global().since(after);
+    let arr: Vec<Json> = lines.iter().map(|l| Json::str(l)).collect();
+    Response::json(
+        200,
+        &Json::build(vec![
+            ("newest", Json::num(newest as f64)),
+            ("logs", Json::arr(arr)),
+        ])
+        .to_string(),
+    )
+}
 
 fn admin_tokens_list(ctx: &ServerCtx) -> Response {
     let list: Vec<Json> = ctx
@@ -1163,6 +1205,7 @@ fn admin_config_save(_ctx: &ServerCtx, req: &Request, kind: &str) -> Response {
 }
 
 fn admin_rebuild(ctx: &ServerCtx) -> Response {
+    crate::logger::push("[admin] 重建索引开始...".to_string());
     match ctx.engine.rebuild(&crate::config::sites_dir(), &crate::config::index_dir()) {
         Ok(n) => Response::json(200, &Json::build(vec![("status", Json::str("ok")), ("sites", Json::num(n as f64))]).to_string()),
         Err(e) => Response::json(500, &Json::build(vec![("status", Json::str("error")), ("message", Json::str(&e))]).to_string()),

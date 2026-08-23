@@ -29,7 +29,12 @@
   .view { display:none; }
   .view.active { display:block; }
   h2 { font-size:20px; margin-bottom:6px; }
-  .sub { color:var(--gray); font-size:13px; margin-bottom:20px; }
+  .log-box { background:#0f1115; color:#d4d7dd; font-family:Consolas,monospace; font-size:12px; line-height:1.7; border-radius:10px; padding:12px 14px; max-height:320px; overflow-y:auto; white-space:pre-wrap; word-break:break-all; }
+  .log-box .l-ok { color:#4ade80; }
+  .log-box .l-warn { color:#ffac02; }
+  .log-box .l-err { color:#ff6b6b; }
+  .bar-wrap { background:#e5e7eb; border-radius:8px; height:10px; overflow:hidden; }
+  .bar { background:var(--accent,#3080ff); height:100%; border-radius:8px; transition:width .4s; }
 
   .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin-bottom:16px; }
   .card h3 { font-size:14px; margin-bottom:12px; }
@@ -120,6 +125,21 @@
         <h3>扫描状态</h3>
         <div class="bar-wrap"><div class="bar" id="ovBar"></div></div>
         <div class="state-line" id="ovScan"></div>
+      </div>
+      <div class="card">
+        <h3>索引构建(实时透明)</h3>
+        <div style="display:flex; gap:10px; align-items:center">
+          <button class="btn sm" onclick="rebuildIndex()">重建索引</button>
+          <span class="tag" id="idxPhase"></span>
+          <span class="tag" id="idxElapsed"></span>
+        </div>
+        <div class="bar-wrap" style="margin-top:10px"><div class="bar" id="idxBar" style="width:0%"></div></div>
+        <div class="state-line" id="idxLine" style="margin-top:8px">当前站点: -</div>
+        <div class="kw-list" id="idxKeywords" style="margin-top:6px"></div>
+      </div>
+      <div class="card">
+        <h3>实时日志</h3>
+        <div class="log-box" id="logBox"></div>
       </div>
     </section>
 
@@ -326,7 +346,7 @@ function switchView(v) {
   if (v === 'tasks') loadTasks();
   if (v === 'duplicates') loadDuplicates(1);
   if (v === 'stats') loadStats();
-  if (v === 'overview') { loadOverview(); pollScan(); }
+  if (v === 'overview') { loadOverview(); pollScan(); pollIndexStatus(); if (!logTimer) { logTimer = setInterval(pollLogs, 1500); pollLogs(); } }
   if (v === 'scan') pollScan();
 }
 
@@ -599,6 +619,57 @@ function loadStats() {
     document.getElementById('perfStats').innerHTML =
       '总搜索 ' + s.total_searches + ' 次 · 索引 ' + s.index_sites + ' 站 / ' + s.index_terms + ' 词 / ' + s.index_blocks + ' 分块 · ' +
       '缓存命中率 ' + Math.round(s.cache_hit_rate * 100) + '% · 爬虫并发 ' + s.crawler_workers;
+  }).catch(function(){});
+}
+
+/* ============ 索引构建进度 + 实时日志 ============ */
+var logCursor = 0;
+var logTimer = null;
+
+function rebuildIndex() {
+  if (!confirm('重建索引?构建期间可实时查看进度(当前站点/关键词/日志)')) return;
+  setMsg('msg', '重建索引已开始,实时进度见概览...', 'warn');
+  adminFetch('/api/admin/rebuild', { method: 'POST' }).then(function(r){ return r.json(); }).then(function(d){
+    setMsg('msg', d.status === 'ok' ? ('重建完成: ' + d.sites + ' 站点') : ('重建失败: ' + (d.message || '')), d.status === 'ok' ? 'ok' : 'err');
+    loadOverview();
+  }).catch(function(e){ setMsg('msg', '重建请求失败(可能仍在构建中): ' + e, 'warn'); });
+  pollIndexStatus();
+}
+
+function pollIndexStatus() {
+  adminFetch('/api/admin/index-status').then(function(r){ return r.json(); }).then(function(s){
+    document.getElementById('idxPhase').textContent = s.phase || '-';
+    document.getElementById('idxElapsed').textContent = s.elapsed_secs > 0 ? Math.round(s.elapsed_secs) + 's' : '';
+    var bar = document.getElementById('idxBar');
+    if (s.total > 0) bar.style.width = Math.min(100, Math.round(s.processed / s.total * 100)) + '%';
+    else bar.style.width = s.running ? '5%' : '0%';
+    var line = '当前站点: ' + (s.current_domain || '-') + ' · 处理 ' + s.processed + '/' + s.total +
+      ' · 索引 ' + s.sites + ' 站 · 去重 ' + s.dup + ' · 黑名单跳过 ' + s.blocked +
+      (s.links_found > 0 ? ' · 发现外链 ' + s.links_found : '');
+    document.getElementById('idxLine').textContent = line;
+    var kws = document.getElementById('idxKeywords');
+    kws.innerHTML = (s.keywords && s.keywords.length) ? s.keywords.map(function(k){ return '<span class="tag">' + esc(k) + '</span>'; }).join('') : '';
+  }).catch(function(){});
+}
+
+function pollLogs() {
+  adminFetch('/api/admin/logs?after=' + logCursor).then(function(r){ return r.json(); }).then(function(d){
+    if (d.logs && d.logs.length) {
+      var box = document.getElementById('logBox');
+      d.logs.forEach(function(line){
+        var cls = 'l-ok';
+        if (line.indexOf('失败') >= 0 || line.indexOf('错误') >= 0 || line.indexOf('error') >= 0) cls = 'l-err';
+        else if (line.indexOf('跳过') >= 0 || line.indexOf('重定向') >= 0 || line.indexOf('非 200') >= 0) cls = 'l-warn';
+        var div = document.createElement('div');
+        div.className = cls;
+        div.textContent = line;
+        box.appendChild(div);
+      });
+      // 限制显示条数,自动滚动到底部
+      while (box.childNodes.length > 300) box.removeChild(box.firstChild);
+      box.scrollTop = box.scrollHeight;
+      logCursor = d.newest;
+    }
   }).catch(function(){});
 }
 

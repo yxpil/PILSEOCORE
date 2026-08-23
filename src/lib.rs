@@ -21,6 +21,7 @@
 //! - [`crawler`]   爬虫(链接发现/robots/BFS 抓取)
 //! - [`tasks`]     定时任务调度(定时扫描/重建/爬虫)
 //! - [`stats`]     搜索/关键词统计(内存聚合)
+//! - [`logger`]    内存环形日志(面板实时流)
 //! - [`config`]   配置加载
 
 pub mod ai;
@@ -34,6 +35,7 @@ pub mod enumerate;
 pub mod http;
 pub mod index;
 pub mod json;
+pub mod logger;
 pub mod mcp;
 pub mod search;
 pub mod server;

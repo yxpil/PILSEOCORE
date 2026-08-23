@@ -308,12 +308,21 @@ fn worker_loop(
                 stats.lock().unwrap().fetched += 1;
                 // favicon 内存缓存(懒加载)
                 ensure_fav(&domain, &favicons, &favicon_order);
-                // 链式发现链接(友链的友链继续解析)
+                // 链式发现链接(友链的友链继续解析),面板日志:XX 发现 YY 链接
                 if depth < max_depth {
                     let mut new_links: Vec<String> = Vec::new();
                     for link in extract_links(&html, &url) {
                         stats.lock().unwrap().discovered += 1;
                         new_links.push(link);
+                    }
+                    if !new_links.is_empty() {
+                        let sample: Vec<&str> = new_links.iter().take(5).map(|s| s.as_str()).collect();
+                        crate::logger::push(format!(
+                            "[crawler] 发现: {} 发现 {} 个链接: {}",
+                            domain,
+                            new_links.len(),
+                            sample.join(" , ")
+                        ));
                     }
                     {
                         let mut v = visited.lock().unwrap();
@@ -328,15 +337,15 @@ fn worker_loop(
                 }
             }
             Ok((status, _)) if status == 301 || status == 302 => {
-                println!("[crawler] 重定向跳过: {} -> {}", url, status);
+                crate::logger::push(format!("[crawler] 重定向跳过: {} -> {}", url, status));
                 stats.lock().unwrap().failed += 1;
             }
             Ok((status, _)) => {
-                println!("[crawler] 非 200 跳过: {} -> {}", url, status);
+                crate::logger::push(format!("[crawler] 非 200 跳过: {} -> {}", url, status));
                 stats.lock().unwrap().failed += 1;
             }
             Err(e) => {
-                println!("[crawler] 抓取失败 {}: {}", url, e);
+                crate::logger::push(format!("[crawler] 抓取失败 {}: {}", url, e));
                 stats.lock().unwrap().failed += 1;
             }
         }

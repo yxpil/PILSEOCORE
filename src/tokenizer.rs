@@ -68,11 +68,17 @@ impl BpeTokenizer {
         }
 
         // 迭代合并直到词表达标或无可合并
+        // 注意:频率平手时必须按对字典序稳定选择(HashMap 迭代顺序随机,
+        // 平手随机选会导致同一语料合并结果不确定,查询/索引分词不一致)
         let mut merges_by_rank: Vec<(u32, u32, u32)> = Vec::new();
         let mut merge_rank: HashMap<(u32, u32), usize> = HashMap::new();
         let mut last_progress = 0usize;
         while vocab.len() < target {
-            let Some(&(l, r)) = pair_counts.iter().max_by_key(|(_, &c)| c).map(|(k, _)| k) else {
+            let Some(&(l, r)) = pair_counts
+                .iter()
+                .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+                .map(|(k, _)| k)
+            else {
                 break;
             };
             let cnt = pair_counts[&(l, r)];
@@ -122,6 +128,34 @@ impl BpeTokenizer {
                 break;
             }
         }
+
+        // ---- 整词阶段:高频合并结束后,剩余未合并的词(频率 1)整词入库 ----
+        // 极小语料(去重后每词仅 1 次)高频合并立即 break,若不补整词,
+        // 查询词将被拆成单字节残片(中文全 lossy),搜索彻底失效
+        if vocab.len() < target {
+            for seq in seqs.iter_mut() {
+                if seq.len() > 1 && vocab.len() < target {
+                    let mut last_id = seq[0];
+                    let mut merged = vocab[last_id as usize].clone();
+                    let mut i = 1;
+                    while i < seq.len() && vocab.len() < target {
+                        let r = seq[i];
+                        let id = vocab.len() as u32;
+                        let mut bytes = merged.clone();
+                        bytes.extend_from_slice(&vocab[r as usize]);
+                        vocab.push(bytes.clone());
+                        token_of.insert(bytes, id);
+                        merge_rank.insert((last_id, r), merges_by_rank.len());
+                        merges_by_rank.push((last_id, r, id));
+                        last_id = id;
+                        merged = vocab[last_id as usize].clone();
+                        i += 1;
+                    }
+                    seq.clear();
+                }
+            }
+        }
+        drop(pair_counts);
 
         BpeTokenizer {
             vocab,

@@ -33,6 +33,25 @@ pub struct SiteIndex {
 /// 文档元数据分片大小(每片 N 个文档,避免单文件过大)
 const DOCS_PER_CHUNK: usize = 256;
 
+/// 索引构建进度(管理面板实时显示)
+#[derive(Clone, Debug, Default)]
+pub struct IndexState {
+    pub phase: String,          // 当前阶段:分词训练 / 扫描站点 / 计数去重 / 写盘
+    pub processed: usize,       // 已处理站点
+    pub total: usize,           // 总站点数
+    pub current_domain: String, // 当前处理站点
+    pub keywords: Vec<String>,  // 当前站点提取的关键词
+    pub links_found: usize,     // 当前站点发现的外链数
+    pub sites: usize,           // 索引站点数(页面数)
+    pub dup: usize,             // 计数去重合并数
+    pub blocked: usize,         // 黑名单跳过数
+    pub running: bool,
+    pub finished: bool,
+    pub error: Option<String>,
+    pub started_ts: u64,
+    pub elapsed_secs: f64,
+}
+
 impl SiteIndex {
     /// 从内存文档直接构造(测试/嵌入式使用,不落盘;同步构建倒排索引)
     pub fn from_docs(docs: Vec<DocMeta>) -> SiteIndex {
@@ -77,6 +96,27 @@ impl SiteIndex {
     ///    不拉黑、不删除结果;手动黑名单域名跳过)
     /// 4. 提取标题/meta,构建分块倒排索引,生成 sitemap.xml
     pub fn build(sites_dir: &Path, data_dir: &Path, blacklist: &Blacklist) -> Result<SiteIndex, String> {
+        SiteIndex::build_with_progress(sites_dir, data_dir, blacklist, None)
+    }
+
+    /// 带进度回调的构建(progress 每处理一个站点更新一次,供面板实时显示)
+    pub fn build_with_progress(
+        sites_dir: &Path,
+        data_dir: &Path,
+        blacklist: &Blacklist,
+        progress: Option<&Mutex<IndexState>>,
+    ) -> Result<SiteIndex, String> {
+        let started = std::time::Instant::now();
+        if let Some(st) = progress {
+            let mut s = st.lock().unwrap();
+            s.running = true;
+            s.finished = false;
+            s.error = None;
+            s.phase = "分词训练".into();
+            s.processed = 0;
+            s.started_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            drop(s);
+        }
         // ---- 1. 训练/加载分词器 ----
         let vocab_path = data_dir.join("tokenizer").join("vocab.json");
         let tokenizer = if vocab_path.exists() {
@@ -115,6 +155,20 @@ impl SiteIndex {
                 scan_dirs.push(crawled);
             }
         }
+        // 站点总数(进度条分母)
+        let mut total_sites = 0usize;
+        for sd in &scan_dirs {
+            if let Ok(rd) = fs::read_dir(sd) {
+                total_sites += rd.flatten().filter(|e| e.path().is_dir()).count();
+            }
+        }
+        if let Some(st) = progress {
+            let mut s = st.lock().unwrap();
+            s.total = total_sites;
+            s.phase = "扫描站点".into();
+            drop(s);
+        }
+        crate::logger::push(format!("[index] 开始扫描 {} 个站点目录(共 {} 站点)", scan_dirs.len(), total_sites));
         for sd in &scan_dirs {
         if sd.exists() {
             let entries = fs::read_dir(sd)
@@ -125,9 +179,21 @@ impl SiteIndex {
                     continue;
                 }
                 let domain = dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                // 进度:当前站点 + 已处理计数
+                if let Some(st) = progress {
+                    let mut s = st.lock().unwrap();
+                    s.processed += 1;
+                    s.current_domain = domain.clone();
+                    s.keywords.clear();
+                    s.links_found = 0;
+                    drop(s);
+                }
                 // 手动黑名单域名:跳过(不索引不计数)
                 if blacklist.is_blocked(&domain) {
                     blocked += 1;
+                    if let Some(st) = progress {
+                        st.lock().unwrap().blocked = blocked;
+                    }
                     continue;
                 }
                 let html_path = dir.join("index.html");
@@ -164,6 +230,9 @@ impl SiteIndex {
                     // 重复:计数到保留文档,本站不建文档
                     docs[doc_id].dup_count += 1;
                     deduped += 1;
+                    if let Some(st) = progress {
+                        st.lock().unwrap().dup = deduped;
+                    }
                     continue;
                 }
 
@@ -176,12 +245,29 @@ impl SiteIndex {
                 }
                 // 外链/友链/JS 链接发现:本站之外的新网站(写入爬虫种子)
                 let base_url = format!("https://{}/", domain);
+                let mut links_found = 0usize;
                 for link in crate::crawler::extract_links(&html, &base_url) {
                     if let Some(d) = crate::crawler::domain_of(&link) {
                         if d != domain {
                             discovered.insert(d);
+                            links_found += 1;
                         }
                     }
+                }
+                // 当前站点关键词(主页 meta)
+                let site_keywords = extract_keywords(&html);
+                if let Some(st) = progress {
+                    let mut s = st.lock().unwrap();
+                    s.keywords = site_keywords.clone();
+                    s.links_found = links_found;
+                    drop(s);
+                }
+                // 面板实时日志:什么网站、什么关键词、发现什么链接
+                let kw_str = if site_keywords.is_empty() { "无".to_string() } else { site_keywords.join("、") };
+                if links_found > 0 {
+                    crate::logger::push(format!("[index] 站点 {}: 关键词[{}], 发现 {} 个外链", domain, kw_str, links_found));
+                } else {
+                    crate::logger::push(format!("[index] 站点 {}: 关键词[{}], 无外链", domain, kw_str));
                 }
                 for (rel, page_html) in &pages {
                     let title = extract_title(page_html).unwrap_or_else(|| domain.clone());
@@ -246,6 +332,12 @@ impl SiteIndex {
 
         fs::create_dir_all(data_dir).map_err(|e| format!("创建索引目录失败: {}", e))?;
         fs::create_dir_all(data_dir.join("blocks")).map_err(|e| format!("创建分块目录失败: {}", e))?;
+        if let Some(st) = progress {
+            let mut s = st.lock().unwrap();
+            s.phase = "写盘".into();
+            s.sites = docs.len();
+            drop(s);
+        }
         let index = SiteIndex {
             docs,
             blocks: Mutex::new(blocks),
@@ -253,6 +345,23 @@ impl SiteIndex {
             tokenizer,
         };
         index.save()?;
+        // 构建完成:进度状态收尾
+        if let Some(st) = progress {
+            let mut s = st.lock().unwrap();
+            s.running = false;
+            s.finished = true;
+            s.phase = "完成".into();
+            s.sites = index.docs.len();
+            s.elapsed_secs = started.elapsed().as_secs_f64();
+            drop(s);
+        }
+        crate::logger::push(format!(
+            "[index] 构建完成: {} 站点(页面), 去重合并 {} , 黑名单跳过 {}, 耗时 {:.1}s",
+            index.docs.len(),
+            deduped,
+            blocked,
+            started.elapsed().as_secs_f64()
+        ));
         Ok(index)
     }
 
