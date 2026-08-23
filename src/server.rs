@@ -90,6 +90,10 @@ pub struct ServerCtx {
     pub tokens: TokenStore,
     pub sessions: Sessions,
     pub scan: Arc<Mutex<ScanState>>,
+    /// 爬虫(外链发现抓取)
+    pub crawler: Arc<crate::crawler::Crawler>,
+    /// 定时任务调度器
+    pub tasks: Arc<crate::tasks::TaskScheduler>,
 }
 
 impl ServerCtx {
@@ -100,6 +104,8 @@ impl ServerCtx {
         admin_pass: String,
         tokens: TokenStore,
         sessions: Sessions,
+        crawler: Arc<crate::crawler::Crawler>,
+        tasks: Arc<crate::tasks::TaskScheduler>,
     ) -> ServerCtx {
         ServerCtx {
             engine,
@@ -109,6 +115,8 @@ impl ServerCtx {
             tokens,
             sessions,
             scan: Arc::new(Mutex::new(ScanState::default())),
+            crawler,
+            tasks,
         }
     }
 
@@ -161,13 +169,25 @@ pub fn handle(ctx: &ServerCtx, req: &Request) -> Response {
             admin_guard(ctx, req, |ctx| admin_tokens_revoke(ctx, id))
         }
         // ---- 黑名单管理 ----
-        ("GET", "/api/admin/blacklist") => admin_guard(ctx, req, |ctx| admin_blacklist_list(ctx)),
+        ("GET", "/api/admin/blacklist") => admin_guard(ctx, req, |ctx| admin_blacklist_list(ctx, req)),
         ("POST", "/api/admin/blacklist") => admin_guard(ctx, req, |ctx| admin_blacklist_add(ctx, req)),
         ("DELETE", "/api/admin/blacklist/") => Response::json(400, r#"{"error":"缺少域名"}"#),
         ("DELETE", p) if p.starts_with("/api/admin/blacklist/") => {
             let domain = &p["/api/admin/blacklist/".len()..];
             admin_guard(ctx, req, |ctx| admin_blacklist_remove(ctx, domain))
         }
+        // ---- 定时任务 ----
+        ("GET", "/api/admin/tasks") => admin_guard(ctx, req, |ctx| admin_tasks_list(ctx)),
+        ("POST", "/api/admin/tasks") => admin_guard(ctx, req, |ctx| admin_tasks_add(ctx, req)),
+        ("POST", "/api/admin/tasks/toggle") => admin_guard(ctx, req, |ctx| admin_tasks_toggle(ctx, req)),
+        ("DELETE", "/api/admin/tasks/") => Response::json(400, r#"{"error":"缺少任务 id"}"#),
+        ("DELETE", p) if p.starts_with("/api/admin/tasks/") => {
+            let id = &p["/api/admin/tasks/".len()..];
+            admin_guard(ctx, req, |ctx| admin_tasks_remove(ctx, id))
+        }
+        // ---- 爬虫 ----
+        ("POST", "/api/admin/crawl") => admin_guard(ctx, req, |ctx| admin_crawl(ctx, req)),
+        ("GET", "/api/admin/crawl-status") => admin_guard(ctx, req, |ctx| admin_crawl_status(ctx)),
         _ => Response::not_found(),
     }
 }
@@ -411,11 +431,19 @@ fn admin_tokens_revoke(ctx: &ServerCtx, id: &str) -> Response {
 
 // ---------------- 黑名单管理 ----------------
 
-fn admin_blacklist_list(ctx: &ServerCtx) -> Response {
-    let entries: Vec<Json> = ctx
-        .engine
-        .blacklist
-        .list()
+fn admin_blacklist_list(ctx: &ServerCtx, req: &Request) -> Response {
+    let all = ctx.engine.blacklist.list();
+    let page = req.param("page").and_then(|s| s.parse::<usize>().ok()).unwrap_or(1).max(1);
+    let limit = req.param("limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(50).min(500).max(1);
+    let total = all.len();
+    let pages = (total + limit - 1) / limit;
+    let start = (page - 1) * limit;
+    let slice: &[crate::blacklist::BlacklistEntry] = if start < all.len() {
+        &all[start..(start + limit).min(all.len())]
+    } else {
+        &[]
+    };
+    let entries: Vec<Json> = slice
         .iter()
         .map(|e| {
             Json::build(vec![
@@ -425,8 +453,16 @@ fn admin_blacklist_list(ctx: &ServerCtx) -> Response {
             ])
         })
         .collect();
-    let n = entries.len();
-    Response::json(200, &Json::build(vec![("count", Json::num(n as f64)), ("blacklist", Json::arr(entries))]).to_string())
+    Response::json(
+        200,
+        &Json::build(vec![
+            ("count", Json::num(total as f64)),
+            ("page", Json::num(page as f64)),
+            ("pages", Json::num(pages as f64)),
+            ("blacklist", Json::arr(entries)),
+        ])
+        .to_string(),
+    )
 }
 
 fn admin_blacklist_add(ctx: &ServerCtx, req: &Request) -> Response {
@@ -448,6 +484,185 @@ fn admin_blacklist_remove(ctx: &ServerCtx, domain: &str) -> Response {
     } else {
         Response::json(404, r#"{"error":"域名不在黑名单"}"#)
     }
+}
+
+// ---------------- 定时任务与爬虫 ----------------
+
+fn admin_tasks_list(ctx: &ServerCtx) -> Response {
+    let tasks: Vec<Json> = ctx
+        .tasks
+        .list()
+        .iter()
+        .map(|t| {
+            Json::build(vec![
+                ("id", Json::str(&t.id)),
+                ("name", Json::str(&t.name)),
+                ("kind", Json::str(&t.kind)),
+                ("interval_secs", Json::num(t.interval_secs as f64)),
+                ("params", t.params.clone()),
+                ("enabled", Json::Bool(t.enabled)),
+                ("last_run", Json::num(t.last_run as f64)),
+            ])
+        })
+        .collect();
+    Response::json(200, &Json::build(vec![("tasks", Json::arr(tasks))]).to_string())
+}
+
+fn admin_tasks_add(ctx: &ServerCtx, req: &Request) -> Response {
+    let body = String::from_utf8_lossy(&req.body);
+    let params = crate::json::parse(&body).unwrap_or(Json::obj());
+    let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let interval = params.get("interval_secs").and_then(|v| v.as_u64()).unwrap_or(3600);
+    if name.is_empty() || !["scan", "rebuild", "crawl"].contains(&kind.as_str()) {
+        return Response::json(400, r#"{"error":"参数缺失: name/kind(scan|rebuild|crawl)/interval_secs"}"#);
+    }
+    let id = format!("t{}", now_secs());
+    let mut task = crate::tasks::Task::new(&id, &name, &kind, interval);
+    task.params = params.get("params").cloned().unwrap_or_else(Json::obj);
+    ctx.tasks.add(task);
+    Response::json(201, &Json::build(vec![("status", Json::str("ok")), ("id", Json::str(&id))]).to_string())
+}
+
+fn admin_tasks_toggle(ctx: &ServerCtx, req: &Request) -> Response {
+    let body = String::from_utf8_lossy(&req.body);
+    let params = crate::json::parse(&body).unwrap_or(Json::obj());
+    let id = params.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let enabled = params.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    if id.is_empty() {
+        return Response::json(400, r#"{"error":"缺少参数 id"}"#);
+    }
+    if ctx.tasks.set_enabled(&id, enabled) {
+        Response::json(200, &Json::build(vec![("status", Json::str("ok")), ("id", Json::str(&id)), ("enabled", Json::Bool(enabled))]).to_string())
+    } else {
+        Response::json(404, r#"{"error":"任务不存在"}"#)
+    }
+}
+
+fn admin_tasks_remove(ctx: &ServerCtx, id: &str) -> Response {
+    if ctx.tasks.remove(id) {
+        Response::json(200, &Json::build(vec![("status", Json::str("ok")), ("removed", Json::str(id))]).to_string())
+    } else {
+        Response::json(404, r#"{"error":"任务不存在"}"#)
+    }
+}
+
+/// 手动触发爬虫(种子 = 外链发现文件 + 手动附加域名)
+fn admin_crawl(ctx: &ServerCtx, req: &Request) -> Response {
+    let mut seeds: Vec<String> = Vec::new();
+    // 读外链发现种子
+    let disc_path = crate::config::index_dir().join("discovered.txt");
+    if let Ok(text) = std::fs::read_to_string(&disc_path) {
+        for line in text.lines() {
+            let d = line.trim();
+            if !d.is_empty() {
+                seeds.push(format!("http://{}/", d));
+            }
+        }
+    }
+    // 手动附加
+    let body = String::from_utf8_lossy(&req.body);
+    let params = crate::json::parse(&body).unwrap_or(Json::obj());
+    if let Some(extra) = params.get("seeds").and_then(|v| v.as_arr()) {
+        for s in extra {
+            if let Some(u) = s.as_str() {
+                let u = u.trim();
+                if !u.is_empty() {
+                    seeds.push(if u.starts_with("http") { u.to_string() } else { format!("http://{}/", u) });
+                }
+            }
+        }
+    }
+    if seeds.is_empty() {
+        return Response::json(400, r#"{"error":"没有种子:先重建索引发现外链,或在 seeds 参数提供"}"#);
+    }
+    let seeds_len = seeds.len();
+    // 后台抓取
+    let crawler = ctx.crawler.clone();
+    std::thread::spawn(move || {
+        let crawled_dir = crate::config::sites_dir().parent().map(|p| p.join("crawled")).unwrap_or_else(|| std::path::PathBuf::from("out/crawled"));
+        crawler.crawl(&seeds, &crawled_dir);
+    });
+    Response::json(202, &Json::build(vec![("status", Json::str("crawl_started")), ("seeds", Json::num(seeds_len as f64))]).to_string())
+}
+
+fn admin_crawl_status(ctx: &ServerCtx) -> Response {
+    let st = ctx.crawler.stats.lock().unwrap().clone();
+    Response::json(
+        200,
+        &Json::build(vec![
+            ("fetched", Json::num(st.fetched as f64)),
+            ("discovered", Json::num(st.discovered as f64)),
+            ("failed", Json::num(st.failed as f64)),
+            ("skipped_robots", Json::num(st.skipped_robots as f64)),
+            ("elapsed_secs", Json::num(st.elapsed_secs)),
+        ])
+        .to_string(),
+    )
+}
+
+/// 执行定时任务(调度线程调用,独立线程运行)
+fn run_task(ctx: &Arc<ServerCtx>, task: &crate::tasks::Task) {
+    match task.kind.as_str() {
+        "scan" => {
+            let max_len = task.params.get("max_len").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
+            let workers = task.params.get("workers").and_then(|v| v.as_u64()).unwrap_or(64) as usize;
+            let max_len = max_len.clamp(1, 20);
+            {
+                let mut scan = ctx.scan.lock().unwrap();
+                if scan.running {
+                    println!("[task] 扫描任务跳过(已有扫描在运行)");
+                    return;
+                }
+                *scan = ScanState::default();
+                scan.running = true;
+                scan.started_ts = now_secs();
+                scan.max_len = max_len;
+            }
+            start_scan_thread(ctx, 1, max_len, workers);
+            println!("[task] 定时扫描启动: max_len={} workers={}", max_len, workers);
+        }
+        "rebuild" => {
+            println!("[task] 定时重建索引...");
+            match ctx.engine.rebuild(&crate::config::sites_dir(), &crate::config::index_dir()) {
+                Ok(n) => println!("[task] 重建完成: {} 站点", n),
+                Err(e) => println!("[task] 重建失败: {}", e),
+            }
+        }
+        "crawl" => {
+            let disc_path = crate::config::index_dir().join("discovered.txt");
+            let seeds: Vec<String> = std::fs::read_to_string(&disc_path)
+                .map(|text| text.lines().map(|l| format!("http://{}/", l.trim())).filter(|s| s.len() > 8).collect())
+                .unwrap_or_default();
+            if seeds.is_empty() {
+                println!("[task] 定时爬虫跳过(无种子,先重建索引发现外链)");
+            } else {
+                let crawled_dir = crate::config::sites_dir().parent().map(|p| p.join("crawled")).unwrap_or_else(|| std::path::PathBuf::from("out/crawled"));
+                let stats = ctx.crawler.crawl(&seeds, &crawled_dir);
+                println!("[task] 爬虫完成: 抓取 {} 发现 {} 失败 {} ({:.0}s)", stats.fetched, stats.discovered, stats.failed, stats.elapsed_secs);
+                // 爬完重建索引收录新站
+                let _ = ctx.engine.rebuild(&crate::config::sites_dir(), &crate::config::index_dir());
+            }
+        }
+        _ => {}
+    }
+    ctx.tasks.mark_run(&task.id);
+}
+
+/// 启动定时任务调度线程(每 30 秒检查一次)
+pub fn spawn_scheduler(ctx: &Arc<ServerCtx>) {
+    let ctx_sched = ctx.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        let due = ctx_sched.tasks.due_tasks();
+        if due.is_empty() {
+            continue;
+        }
+        for task in due {
+            let ctx_task = ctx_sched.clone();
+            std::thread::spawn(move || run_task(&ctx_task, &task));
+        }
+    });
 }
 
 // ---------------- 管理员 API ----------------
@@ -529,7 +744,13 @@ fn admin_scan(ctx: &ServerCtx, req: &Request) -> Response {
         scan.started_ts = now_secs();
         scan.max_len = max_len;
     }
+    start_scan_thread(ctx, min_len, max_len, workers);
 
+    Response::json(202, &Json::build(vec![("status", Json::str("scan_started")), ("max_len", Json::num(max_len as f64))]).to_string())
+}
+
+/// 启动后台穷举扫描线程(管理 API 与定时任务共用)
+fn start_scan_thread(ctx: &ServerCtx, min_len: usize, max_len: usize, workers: usize) {
     let engine = ctx.engine.clone();
     let scan_state = ctx.scan.clone();
     std::thread::spawn(move || {
@@ -553,8 +774,6 @@ fn admin_scan(ctx: &ServerCtx, req: &Request) -> Response {
         // 扫描完成后自动重建索引,让新站点立即可搜
         let _ = engine.rebuild(&crate::config::sites_dir(), &crate::config::index_dir());
     });
-
-    Response::json(202, &Json::build(vec![("status", Json::str("scan_started")), ("max_len", Json::num(max_len as f64))]).to_string())
 }
 
 /// 在后台线程执行穷举扫描(独立读配置,仅覆盖 min/max_len 与 workers)

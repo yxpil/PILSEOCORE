@@ -18,12 +18,15 @@
 //! - [`auth`]     API/MCP token 签发与会话
 //! - [`blacklist`] 内容指纹去重/雷同自动拉黑(SimHash)
 //! - [`tokenizer`] BPE 分词器(81920 词表)
+//! - [`crawler`]   爬虫(链接发现/robots/BFS 抓取)
+//! - [`tasks`]     定时任务调度(定时扫描/重建/爬虫)
 //! - [`config`]   配置加载
 
 pub mod ai;
 pub mod auth;
 pub mod blacklist;
 pub mod config;
+pub mod crawler;
 pub mod dns;
 pub mod engine;
 pub mod enumerate;
@@ -34,4 +37,5 @@ pub mod mcp;
 pub mod search;
 pub mod server;
 pub mod site;
+pub mod tasks;
 pub mod tokenizer;

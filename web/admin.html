@@ -98,6 +98,8 @@
       <div class="nav-item active" data-view="overview" onclick="switchView('overview')">概览</div>
       <div class="nav-item" data-view="scan" onclick="switchView('scan')">穷举控制</div>
       <div class="nav-item" data-view="config" onclick="switchView('config')">后缀与 DNS</div>
+      <div class="nav-item" data-view="crawl" onclick="switchView('crawl')">爬虫</div>
+      <div class="nav-item" data-view="tasks" onclick="switchView('tasks')">定时任务</div>
       <div class="nav-item" data-view="tokens" onclick="switchView('tokens')">API Token</div>
       <div class="nav-item" data-view="blacklist" onclick="switchView('blacklist')">黑名单</div>
     </nav>
@@ -150,6 +152,43 @@
         <h3>DNS 服务器列表(每行一个)</h3>
         <textarea id="dnsEdit"></textarea>
         <button class="btn sec sm" style="margin-top:10px" onclick="saveConfig('dns')">保存 DNS 列表</button>
+      </div>
+    </section>
+
+    <!-- 爬虫 -->
+    <section id="view-crawl" class="view">
+      <h2>爬虫</h2>
+      <div class="sub">从外链发现/手动种子出发 BFS 抓取,遵守 robots.txt,发现更多网站;抓取结果存入 out/crawled 并重建索引收录</div>
+      <div class="card">
+        <h3>手动触发抓取</h3>
+        <label style="margin-top:0">附加种子(每行一个域名或 URL,留空则仅用外链发现)</label>
+        <textarea id="crawlSeeds" placeholder="friend-site.com&#10;http://192.168.1.10/"></textarea>
+        <button class="btn" style="margin-top:10px" onclick="startCrawl()">开始抓取</button>
+        <div class="state-line" id="crawlStats" style="margin-top:10px"></div>
+      </div>
+    </section>
+
+    <!-- 定时任务 -->
+    <section id="view-tasks" class="view">
+      <h2>定时任务</h2>
+      <div class="sub">定时执行穷举扫描 / 重建索引 / 爬虫抓取(调度线程每 30 秒检查)</div>
+      <div class="card">
+        <h3>新建任务</h3>
+        <div class="row">
+          <div style="flex:1"><label style="margin-top:0">名称</label><input type="text" id="taskName" placeholder="如 每日更新"></div>
+          <div style="flex:1"><label style="margin-top:0">类型</label>
+            <select id="taskKind" style="width:100%; padding:9px 12px; border:1px solid var(--line); border-radius:8px; font-size:14px; background:#fff">
+              <option value="rebuild">重建索引</option>
+              <option value="crawl">爬虫抓取</option>
+              <option value="scan">穷举扫描</option>
+            </select>
+          </div>
+          <div style="flex:1"><label style="margin-top:0">间隔(分钟)</label><input type="number" id="taskInterval" value="60" min="1"></div>
+        </div>
+        <div style="margin-top:12px; display:flex; gap:10px">
+          <button class="btn sm" onclick="addTask()">添加任务</button>
+        </div>
+        <div id="taskList" style="margin-top:12px"></div>
       </div>
     </section>
 
@@ -229,7 +268,9 @@ function switchView(v) {
   document.querySelectorAll('.view').forEach(function(s){ s.classList.toggle('active', s.id === 'view-' + v); });
   if (v === 'config') loadConfigs();
   if (v === 'tokens') loadTokens();
-  if (v === 'blacklist') loadBlacklist();
+  if (v === 'blacklist') loadBlacklist(1);
+  if (v === 'crawl') pollCrawl();
+  if (v === 'tasks') loadTasks();
   if (v === 'overview') { loadOverview(); pollScan(); }
   if (v === 'scan') pollScan();
 }
@@ -341,16 +382,97 @@ function revokeToken(id) {
   });
 }
 
+/* ============ 爬虫 ============ */
+function startCrawl() {
+  var seeds = document.getElementById('crawlSeeds').value.split('\n').map(function(s){ return s.trim(); }).filter(function(s){ return s; });
+  setMsg('msg', '爬虫已启动(后台抓取)...', 'warn');
+  adminFetch('/api/admin/crawl', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({seeds: seeds})
+  }).then(function(r){ return r.json().then(function(d){ return {status:r.status, d:d}; }); }).then(function(res){
+    if (res.status === 202) setMsg('msg', '爬虫已启动: ' + res.d.seeds + ' 个种子', 'ok');
+    else setMsg('msg', '启动失败: ' + (res.d.error || res.status), 'err');
+    pollCrawl();
+  }).catch(function(e){ setMsg('msg', '请求失败: ' + e, 'err'); });
+}
+
+function pollCrawl() {
+  adminFetch('/api/admin/crawl-status').then(function(r){ return r.json(); }).then(function(s){
+    var el = document.getElementById('crawlStats');
+    el.textContent = '抓取 ' + s.fetched + ' 页 · 发现 ' + s.discovered + ' 链接 · 失败 ' + s.failed + ' · robots跳过 ' + s.skipped_robots + (s.elapsed_secs > 0 ? ' · 耗时 ' + Math.round(s.elapsed_secs) + 's' : '');
+  }).catch(function(){});
+}
+
+/* ============ 定时任务 ============ */
+function loadTasks() {
+  adminFetch('/api/admin/tasks').then(function(r){ return r.json(); }).then(function(d){
+    var list = d.tasks || [];
+    var el = document.getElementById('taskList');
+    if (!list.length) { el.innerHTML = '<div class="sub" style="margin:0">暂无任务</div>'; return; }
+    el.innerHTML = list.map(function(t){
+      var kindName = t.kind === 'scan' ? '穷举扫描' : (t.kind === 'rebuild' ? '重建索引' : '爬虫抓取');
+      var last = t.last_run > 0 ? new Date(t.last_run * 1000).toLocaleString() : '从未';
+      return '<div class="list-item"><b>' + esc(t.name) + ' <span class="tag">' + kindName + '</span></b>' +
+        '<span class="tag">每 ' + Math.round(t.interval_secs / 60) + ' 分钟</span>' +
+        '<span class="tag">上次 ' + last + '</span>' +
+        '<a class="link" onclick="toggleTask(\'' + t.id + '\',' + (t.enabled ? 'false' : 'true') + ')">' + (t.enabled ? '停用' : '启用') + '</a>' +
+        '<a class="link red" onclick="removeTask(\'' + t.id + '\')">删除</a></div>';
+    }).join('');
+  }).catch(function(){});
+}
+
+function addTask() {
+  var name = document.getElementById('taskName').value.trim();
+  var kind = document.getElementById('taskKind').value;
+  var interval = parseInt(document.getElementById('taskInterval').value, 10) || 60;
+  if (!name) { setMsg('msg', '请填写任务名称', 'err'); return; }
+  adminFetch('/api/admin/tasks', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({name: name, kind: kind, interval_secs: interval * 60, params: {}})
+  }).then(function(r){ return r.json().then(function(d){ return {status:r.status, d:d}; }); }).then(function(res){
+    setMsg('msg', res.status === 201 ? '任务已添加' : ('添加失败: ' + (res.d.error || res.status)), res.status === 201 ? 'ok' : 'err');
+    if (res.status === 201) { document.getElementById('taskName').value = ''; loadTasks(); }
+  }).catch(function(e){ setMsg('msg', '请求失败: ' + e, 'err'); });
+}
+
+function toggleTask(id, enabled) {
+  adminFetch('/api/admin/tasks/toggle', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({id: id, enabled: enabled})
+  }).then(function(r){
+    setMsg('msg', r.status === 200 ? '已更新' : '操作失败', r.status === 200 ? 'ok' : 'err');
+    loadTasks();
+  });
+}
+
+function removeTask(id) {
+  if (!confirm('删除该定时任务?')) return;
+  adminFetch('/api/admin/tasks/' + id, { method: 'DELETE' }).then(function(r){
+    setMsg('msg', r.status === 200 ? '已删除' : '删除失败', r.status === 200 ? 'ok' : 'err');
+    loadTasks();
+  });
+}
+
 /* ============ 黑名单 ============ */
-function loadBlacklist() {
-  adminFetch('/api/admin/blacklist').then(function(r){ return r.json(); }).then(function(d){
+function loadBlacklist(page) {
+  page = page || 1;
+  adminFetch('/api/admin/blacklist?page=' + page + '&limit=50').then(function(r){ return r.json(); }).then(function(d){
     var list = d.blacklist || [];
     var el = document.getElementById('blList');
     if (!list.length) { el.innerHTML = '<div class="sub" style="margin:0">黑名单为空</div>'; return; }
-    el.innerHTML = list.map(function(b){
+    var html = list.map(function(b){
       var reason = b.reason === 'manual' ? '手动拉黑' : esc(b.reason);
       return '<div class="list-item"><b>' + esc(b.domain) + '</b><span class="tag">' + reason + '</span><span class="tag">' + new Date(b.added_at*1000).toLocaleString() + '</span><a class="link" onclick="removeBlacklist(\'' + esc(b.domain) + '\')">解除</a></div>';
     }).join('');
+    // 分页
+    if (d.pages > 1) {
+      html += '<div style="display:flex; gap:6px; justify-content:center; margin-top:12px">';
+      if (page > 1) html += '<a class="link" onclick="loadBlacklist(' + (page - 1) + ')">上一页</a>';
+      html += '<span class="tag">' + page + ' / ' + d.pages + ' 页(共 ' + d.count + ' 条)</span>';
+      if (page < d.pages) html += '<a class="link" onclick="loadBlacklist(' + (page + 1) + ')">下一页</a>';
+      html += '</div>';
+    }
+    el.innerHTML = html;
   }).catch(function(){});
 }
 function addBlacklist() {

@@ -104,10 +104,21 @@ impl SiteIndex {
         let mut deduped = 0usize; // 计数去重数量
         // 指纹库:fnv 精确重复索引 + simhash 雷同索引 (fnv -> (simhash, len, doc_id))
         let mut fingerprints: HashMap<u64, (u64, usize, usize)> = HashMap::new();
+        // 外链发现:本站之外的新网站(爬虫种子)
+        let mut discovered: HashSet<String> = HashSet::new();
 
-        if sites_dir.exists() {
-            let entries = fs::read_dir(sites_dir)
-                .map_err(|e| format!("读取站点目录失败 {}: {}", sites_dir.display(), e))?;
+        // 扫描目录:主站点目录 + 爬虫抓取目录(同级的 crawled)
+        let mut scan_dirs: Vec<std::path::PathBuf> = vec![sites_dir.to_path_buf()];
+        if let Some(parent) = sites_dir.parent() {
+            let crawled = parent.join("crawled");
+            if crawled.exists() {
+                scan_dirs.push(crawled);
+            }
+        }
+        for sd in &scan_dirs {
+        if sd.exists() {
+            let entries = fs::read_dir(sd)
+                .map_err(|e| format!("读取站点目录失败 {}: {}", sd.display(), e))?;
             for entry in entries.flatten() {
                 let dir = entry.path();
                 if !dir.is_dir() {
@@ -159,6 +170,19 @@ impl SiteIndex {
                 // 发现站内全部页面(.html,含子目录)
                 let pages = discover_pages(&dir);
                 let mut page_urls: Vec<String> = Vec::new();
+                // 解析站点已有 sitemap.xml:<loc> URL 也纳入发现
+                if let Ok(sm) = fs::read_to_string(dir.join("sitemap.xml")) {
+                    page_urls.extend(extract_sitemap_locs(&sm));
+                }
+                // 外链/友链/JS 链接发现:本站之外的新网站(写入爬虫种子)
+                let base_url = format!("https://{}/", domain);
+                for link in crate::crawler::extract_links(&html, &base_url) {
+                    if let Some(d) = crate::crawler::domain_of(&link) {
+                        if d != domain {
+                            discovered.insert(d);
+                        }
+                    }
+                }
                 for (rel, page_html) in &pages {
                     let title = extract_title(page_html).unwrap_or_else(|| domain.clone());
                     let description = extract_meta(page_html, "description").unwrap_or_default();
@@ -204,11 +228,20 @@ impl SiteIndex {
                 let _ = gen_sitemap(&dir, &domain, &html, &page_urls);
             }
         }
+        } // for sd
         if deduped > 0 {
             println!("[index] 内容计数去重: {} 个站点与已有内容重复/雷同(计数合并)", deduped);
         }
         if blocked > 0 {
             println!("[index] 跳过手动黑名单域名: {} 个", blocked);
+        }
+        // 外链发现结果 -> 爬虫种子文件
+        if !discovered.is_empty() {
+            let mut seeds: Vec<String> = discovered.into_iter().collect();
+            seeds.sort();
+            let disc_path = data_dir.join("discovered.txt");
+            let _ = fs::write(&disc_path, seeds.join("\n"));
+            println!("[index] 外链发现新网站 {} 个(爬虫种子已写入 {})", seeds.len(), disc_path.display());
         }
 
         fs::create_dir_all(data_dir).map_err(|e| format!("创建索引目录失败: {}", e))?;
@@ -580,6 +613,27 @@ fn extract_page_text(html: &str) -> String {
     s
 }
 
+/// 解析 sitemap.xml 的 <loc> URL 列表
+pub fn extract_sitemap_locs(xml: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let lower = xml.to_lowercase();
+    let mut pos = 0;
+    while let Some(rel) = lower[pos..].find("<loc>") {
+        let start = pos + rel + 5;
+        if let Some(end_rel) = lower[start..].find("</loc>") {
+            let end = start + end_rel;
+            let loc = xml[start..end].trim().to_string();
+            if !loc.is_empty() {
+                out.push(loc);
+            }
+            pos = end + 6;
+        } else {
+            break;
+        }
+    }
+    out
+}
+
 /// 为站点生成 sitemap.xml(主页 + <a> 链接发现 + 发现的页面)
 fn gen_sitemap(site_dir: &Path, domain: &str, html: &str, discovered: &[String]) -> Result<(), String> {
     // 从 <a href> 提取站内链接
@@ -703,6 +757,17 @@ mod tests {
         assert_eq!(loaded.docs.len(), 2);
         assert_eq!(loaded.docs[1].keywords, vec!["b".to_string()]);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_sitemap_locs_parses() {
+        let xml = r#"<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <url><loc>https://a.com/</loc></url>
+          <url><loc>https://a.com/about.html</loc></url>
+        </urlset>"#;
+        let locs = extract_sitemap_locs(xml);
+        assert_eq!(locs.len(), 2);
+        assert_eq!(locs[1], "https://a.com/about.html");
     }
 
     /// 折叠键:站群模板标题去掉域名后缀

@@ -2,11 +2,111 @@
 //!
 //! 单线程 accept + 每连接一线程;支持 GET/POST、查询参数、
 //! Content-Length 请求体、Keep-Alive 基础处理
+//! 另提供 HTTP 客户端 http_get(爬虫用)
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
+use std::time::Duration;
+
+/// HTTP 客户端:GET 请求,返回 (状态码, 响应体)。
+/// 仅支持 http:// 明文(零依赖无 TLS);https 站点跳过
+pub fn http_get(url: &str, timeout_ms: u64, ua: &str) -> Result<(u16, String), String> {
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| format!("仅支持 http:// 明文地址: {}", url))?;
+    let (hostport, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    let path = if path.is_empty() { "/" } else { path };
+    let (host, port) = match hostport.rfind(':') {
+        Some(i) => (&hostport[..i], hostport[i + 1..].parse::<u16>().unwrap_or(80)),
+        None => (hostport, 80u16),
+    };
+    if host.is_empty() {
+        return Err(format!("地址无效: {}", url));
+    }
+    let addr = format!("{}:{}", host, port);
+    let mut stream = TcpStream::connect(&addr).map_err(|e| format!("连接 {} 失败: {}", addr, e))?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(timeout_ms)))
+        .map_err(|e| format!("设置超时失败: {}", e))?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(timeout_ms)))
+        .ok();
+    let req = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: text/html,application/xhtml+xml,*/*;q=0.8\r\nConnection: close\r\n\r\n",
+        path, hostport, ua
+    );
+    stream.write_all(req.as_bytes()).map_err(|e| format!("发送请求失败: {}", e))?;
+    stream.flush().ok();
+
+    let mut reader = BufReader::new(stream);
+    let mut status_line = String::new();
+    reader.read_line(&mut status_line).map_err(|e| format!("读取响应头失败: {}", e))?;
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    // 响应头
+    let mut content_length: Option<usize> = None;
+    let mut chunked = false;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).map_err(|e| format!("读取响应头失败: {}", e))? == 0 {
+            break;
+        }
+        let t = line.trim_end();
+        if t.is_empty() {
+            break;
+        }
+        let lower = t.to_lowercase();
+        if let Some(v) = lower.strip_prefix("content-length:") {
+            content_length = v.trim().parse().ok();
+        } else if lower.starts_with("transfer-encoding:") && lower.contains("chunked") {
+            chunked = true;
+        }
+    }
+    // 响应体(限 8MB)
+    let max_body = 8 * 1024 * 1024;
+    let mut body = Vec::new();
+    if chunked {
+        // 分块传输:逐块读取
+        loop {
+            let mut size_line = String::new();
+            if reader.read_line(&mut size_line).map_err(|e| format!("读取分块失败: {}", e))? == 0 {
+                break;
+            }
+            let size = usize::from_str_radix(size_line.trim(), 16).unwrap_or(0);
+            if size == 0 {
+                break;
+            }
+            let mut buf = vec![0u8; size];
+            reader.read_exact(&mut buf).map_err(|e| format!("读取分块数据失败: {}", e))?;
+            body.extend_from_slice(&buf);
+            reader.read_line(&mut String::new()).ok(); // 块尾 CRLF
+            if body.len() > max_body {
+                break;
+            }
+        }
+    } else if let Some(cl) = content_length {
+        if cl > max_body {
+            return Err(format!("响应体过大: {} 字节", cl));
+        }
+        let mut buf = vec![0u8; cl];
+        reader.read_exact(&mut buf).map_err(|e| format!("读取响应体失败: {}", e))?;
+        body = buf;
+    } else {
+        reader.read_to_end(&mut body).map_err(|e| format!("读取响应体失败: {}", e))?;
+        if body.len() > max_body {
+            body.truncate(max_body);
+        }
+    }
+    Ok((status, String::from_utf8_lossy(&body).into_owned()))
+}
 
 #[derive(Clone, Debug)]
 #[allow(dead_code)] // headers/body 供 POST 扩展使用
