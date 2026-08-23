@@ -10,6 +10,9 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// favicon 占位图(SVG 字母图标,内存返回,不落盘)
+pub const FAVICON_PLACEHOLDER: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#1a73e8"/><text x="16" y="22" font-size="16" font-family="Arial" font-weight="bold" fill="#fff" text-anchor="middle">P</text></svg>"##;
+
 /// HTTP 客户端:GET 请求,返回 (状态码, 响应体)。
 /// 仅支持 http:// 明文(零依赖无 TLS);https 站点跳过
 pub fn http_get(url: &str, timeout_ms: u64, ua: &str) -> Result<(u16, String), String> {

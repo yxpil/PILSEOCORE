@@ -20,6 +20,7 @@
 //! - [`tokenizer`] BPE 分词器(81920 词表)
 //! - [`crawler`]   爬虫(链接发现/robots/BFS 抓取)
 //! - [`tasks`]     定时任务调度(定时扫描/重建/爬虫)
+//! - [`stats`]     搜索/关键词统计(内存聚合)
 //! - [`config`]   配置加载
 
 pub mod ai;
@@ -37,5 +38,6 @@ pub mod mcp;
 pub mod search;
 pub mod server;
 pub mod site;
+pub mod stats;
 pub mod tasks;
 pub mod tokenizer;

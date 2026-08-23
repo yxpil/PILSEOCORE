@@ -41,6 +41,7 @@
   .stat { color:var(--gray); font-size:13px; margin:0 0 18px; }
   .result { margin-bottom:26px; }
   .result .url { color:var(--green); font-size:13px; margin-bottom:2px; }
+  .result .url .fav { width:16px; height:16px; vertical-align:-3px; margin-right:6px; border-radius:3px; }
   .result .title { font-size:20px; color:#1a0dab; }
   .result .title:hover { text-decoration:underline; }
   .result .desc { color:#4d5156; font-size:14px; line-height:1.58; margin-top:4px; }
@@ -229,7 +230,7 @@ function render(d, q) {
   }
   d.results.forEach(function(r){
     html += '<div class="result">';
-    html += '<div class="url">' + esc(r.url) + '</div>';
+    html += '<div class="url"><img class="fav" src="/api/favicon/' + encodeURIComponent(r.domain) + '" alt="" onerror="this.style.display=\'none\'">' + esc(r.url) + '</div>';
     html += '<a class="title" href="' + esc(r.url) + '" target="_blank">' + esc(r.title) + '</a>';
     html += '<div class="desc">' + esc(r.description || '') + '</div>';
     if (r.fold_count > 1) html += '<div class="kw">另有 ' + (r.fold_count - 1) + ' 个相同标题站点</div>';

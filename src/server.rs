@@ -94,6 +94,8 @@ pub struct ServerCtx {
     pub crawler: Arc<crate::crawler::Crawler>,
     /// 定时任务调度器
     pub tasks: Arc<crate::tasks::TaskScheduler>,
+    /// 搜索统计(内存聚合)
+    pub stats: Arc<crate::stats::StatsCollector>,
 }
 
 impl ServerCtx {
@@ -106,6 +108,7 @@ impl ServerCtx {
         sessions: Sessions,
         crawler: Arc<crate::crawler::Crawler>,
         tasks: Arc<crate::tasks::TaskScheduler>,
+        stats: Arc<crate::stats::StatsCollector>,
     ) -> ServerCtx {
         ServerCtx {
             engine,
@@ -117,6 +120,7 @@ impl ServerCtx {
             scan: Arc::new(Mutex::new(ScanState::default())),
             crawler,
             tasks,
+            stats,
         }
     }
 
@@ -188,6 +192,19 @@ pub fn handle(ctx: &ServerCtx, req: &Request) -> Response {
         // ---- 爬虫 ----
         ("POST", "/api/admin/crawl") => admin_guard(ctx, req, |ctx| admin_crawl(ctx, req)),
         ("GET", "/api/admin/crawl-status") => admin_guard(ctx, req, |ctx| admin_crawl_status(ctx)),
+        ("POST", "/api/admin/add-site") => admin_guard(ctx, req, |ctx| admin_add_site(ctx, req)),
+        // ---- 重复清理/批量 ----
+        ("GET", "/api/admin/duplicates") => admin_guard(ctx, req, |ctx| admin_duplicates(ctx, req)),
+        ("POST", "/api/admin/blacklist/batch") => admin_guard(ctx, req, |ctx| admin_blacklist_batch(ctx, req)),
+        ("POST", "/api/admin/cleanup") => admin_guard(ctx, req, |ctx| admin_cleanup(ctx, req)),
+        // ---- 统计 ----
+        ("GET", "/api/admin/stats") => admin_guard(ctx, req, |ctx| admin_stats(ctx)),
+        // ---- favicon(内存缓存,公开可访问) ----
+        ("GET", "/api/favicon/") => Response::json(404, r#"{"error":"缺少域名"}"#),
+        ("GET", p) if p.starts_with("/api/favicon/") => {
+            let domain = &p["/api/favicon/".len()..];
+            api_favicon(ctx, domain)
+        }
         _ => Response::not_found(),
     }
 }
@@ -257,6 +274,8 @@ fn api_stats(ctx: &ServerCtx) -> Response {
 
 fn api_search(ctx: &ServerCtx, req: &Request) -> Response {
     let q = req.param("q").unwrap_or("").trim().to_string();
+    // 搜索统计(内存聚合)
+    ctx.stats.record(&q);
     let page = req.param("page").and_then(|s| s.parse::<usize>().ok()).unwrap_or(1).max(1);
     let limit = req.param("limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(10).min(100).max(1);
     let want_ai = req.param("ai").map(|v| v == "1" || v == "true").unwrap_or(false);
@@ -547,10 +566,19 @@ fn admin_tasks_remove(ctx: &ServerCtx, id: &str) -> Response {
     }
 }
 
-/// 手动触发爬虫(种子 = 外链发现文件 + 手动附加域名)
+/// 手动触发爬虫(种子 = 白名单 + 外链发现 + 手动附加;参数:深度/页数/并发)
 fn admin_crawl(ctx: &ServerCtx, req: &Request) -> Response {
     let mut seeds: Vec<String> = Vec::new();
-    // 读外链发现种子
+    // 1. 白名单种子(whitelist.sorl 国内基础名单,链式扩展;no_whitelist=true 跳过)
+    let body = String::from_utf8_lossy(&req.body);
+    let params = crate::json::parse(&body).unwrap_or(Json::obj());
+    let no_whitelist = params.get("no_whitelist").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !no_whitelist {
+        for d in whitelist_domains() {
+            seeds.push(format!("http://{}/", d));
+        }
+    }
+    // 2. 外链发现种子
     let disc_path = crate::config::index_dir().join("discovered.txt");
     if let Ok(text) = std::fs::read_to_string(&disc_path) {
         for line in text.lines() {
@@ -560,9 +588,7 @@ fn admin_crawl(ctx: &ServerCtx, req: &Request) -> Response {
             }
         }
     }
-    // 手动附加
-    let body = String::from_utf8_lossy(&req.body);
-    let params = crate::json::parse(&body).unwrap_or(Json::obj());
+    // 3. 手动附加
     if let Some(extra) = params.get("seeds").and_then(|v| v.as_arr()) {
         for s in extra {
             if let Some(u) = s.as_str() {
@@ -573,17 +599,271 @@ fn admin_crawl(ctx: &ServerCtx, req: &Request) -> Response {
             }
         }
     }
+    // 去重
+    let mut seen_set = std::collections::HashSet::new();
+    seeds.retain(|s| seen_set.insert(s.clone()));
     if seeds.is_empty() {
-        return Response::json(400, r#"{"error":"没有种子:先重建索引发现外链,或在 seeds 参数提供"}"#);
+        return Response::json(400, r#"{"error":"没有种子:配置白名单/重建索引发现外链,或在 seeds 参数提供"}"#);
     }
-    let seeds_len = seeds.len();
-    // 后台抓取
+    // 参数:深度/页数/每域/并发/超时
+    let depth = params.get("depth").and_then(|v| v.as_u64()).unwrap_or(3).min(10) as usize;
+    let max_pages = params.get("max_pages").and_then(|v| v.as_u64()).unwrap_or(2000).min(200_000) as usize;
+    let per_domain = params.get("per_domain").and_then(|v| v.as_u64()).unwrap_or(100).min(5000) as usize;
+    let workers = params.get("workers").and_then(|v| v.as_u64()).unwrap_or(0).min(128) as usize;
+    let timeout = params.get("timeout_ms").and_then(|v| v.as_u64()).unwrap_or(5000) as u64;
+
     let crawler = ctx.crawler.clone();
+    let engine = ctx.engine.clone();
+    let seeds_len = seeds.len();
+    let out_dir = crawl_out_dir();
     std::thread::spawn(move || {
-        let crawled_dir = crate::config::sites_dir().parent().map(|p| p.join("crawled")).unwrap_or_else(|| std::path::PathBuf::from("out/crawled"));
-        crawler.crawl(&seeds, &crawled_dir);
+        crawler.set_workers(workers);
+        let c = crate::crawler::Crawler::new(depth, max_pages, per_domain, timeout, crawler.worker_count());
+        *crawler.stats.lock().unwrap() = crate::crawler::CrawlStats::default();
+        let stats = c.crawl(&seeds, &out_dir);
+        {
+            let mut st = crawler.stats.lock().unwrap();
+            st.fetched = stats.fetched;
+            st.discovered = stats.discovered;
+            st.failed = stats.failed;
+            st.skipped_robots = stats.skipped_robots;
+            st.elapsed_secs = stats.elapsed_secs;
+        }
+        println!("[crawler] 完成: 抓取 {} 发现 {} 失败 {} ({:.0}s, workers={})", stats.fetched, stats.discovered, stats.failed, stats.elapsed_secs, c.worker_count());
+        // 爬完重建索引收录新站
+        let _ = engine.rebuild(&crate::config::sites_dir(), &crate::config::index_dir());
     });
-    Response::json(202, &Json::build(vec![("status", Json::str("crawl_started")), ("seeds", Json::num(seeds_len as f64))]).to_string())
+    Response::json(
+        202,
+        &Json::build(vec![
+            ("status", Json::str("crawl_started")),
+            ("seeds", Json::num(seeds_len as f64)),
+            ("workers", Json::num(if workers > 0 { workers as f64 } else { std::thread::available_parallelism().map(|n| n.get() as f64).unwrap_or(4.0) })),
+        ])
+        .to_string(),
+    )
+}
+
+/// 手动添加域名:抓取(robots+sitemap)+ 落盘 + 重建索引,自动完成
+fn admin_add_site(ctx: &ServerCtx, req: &Request) -> Response {
+    let body = String::from_utf8_lossy(&req.body);
+    let params = crate::json::parse(&body).unwrap_or(Json::obj());
+    let domain = params.get("domain").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    if domain.is_empty() {
+        return Response::json(400, r#"{"error":"缺少参数 domain"}"#);
+    }
+    let url = if domain.starts_with("http") { domain.clone() } else { format!("http://{}/", domain) };
+    let engine = ctx.engine.clone();
+    let domain_clone = domain.clone();
+    std::thread::spawn(move || {
+        let out_dir = crawl_out_dir();
+        let c = crate::crawler::Crawler::new(2, 500, 200, 5000, 4);
+        let stats = c.crawl(&[url], &out_dir);
+        println!("[add-site] {} 抓取完成: {} 页,{} 失败", domain_clone, stats.fetched, stats.failed);
+        // 自动重建索引
+        let _ = engine.rebuild(&crate::config::sites_dir(), &crate::config::index_dir());
+    });
+    Response::json(202, &Json::build(vec![("status", Json::str("added")), ("domain", Json::str(&domain))]).to_string())
+}
+
+/// 重复标题列表(按折叠标题分组,count>1 的组,分页)
+fn admin_duplicates(ctx: &ServerCtx, req: &Request) -> Response {
+    let page = req.param("page").and_then(|s| s.parse::<usize>().ok()).unwrap_or(1).max(1);
+    let limit = req.param("limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(20).min(200).max(1);
+    let idx = ctx.engine.index().lock().unwrap();
+    // 按折叠标题分组
+    let mut groups: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    for (i, d) in idx.docs.iter().enumerate() {
+        let key = crate::search::fold_key(&d.title, &d.domain);
+        groups.entry(key).or_default().push(i);
+    }
+    drop(idx);
+    let mut dup_groups: Vec<(String, usize, Vec<(String, String)>)> = groups
+        .into_iter()
+        .filter(|(_, ids)| ids.len() > 1)
+        .map(|(key, ids)| {
+            let n = ids.len();
+            let ctx2 = ctx.engine.index().lock().unwrap();
+            let samples: Vec<(String, String)> = ids.iter().take(10).map(|&i| (ctx2.docs[i].domain.clone(), ctx2.docs[i].url.clone())).collect();
+            drop(ctx2);
+            (key, n, samples)
+        })
+        .collect();
+    dup_groups.sort_by(|a, b| b.1.cmp(&a.1));
+    let total = dup_groups.len();
+    let pages = (total + limit - 1) / limit;
+    let start = (page - 1) * limit;
+    let slice: Vec<&(String, usize, Vec<(String, String)>)> = if start < total {
+        dup_groups[start..(start + limit).min(total)].iter().collect()
+    } else {
+        vec![]
+    };
+    let groups_json: Vec<Json> = slice
+        .iter()
+        .map(|(key, n, samples)| {
+            Json::build(vec![
+                ("title", Json::str(key)),
+                ("count", Json::num(*n as f64)),
+                ("domains", Json::arr(samples.iter().map(|(d, u)| Json::build(vec![("domain", Json::str(d)), ("url", Json::str(u))])).collect())),
+            ])
+        })
+        .collect();
+    Response::json(
+        200,
+        &Json::build(vec![
+            ("count", Json::num(total as f64)),
+            ("page", Json::num(page as f64)),
+            ("pages", Json::num(pages as f64)),
+            ("groups", Json::arr(groups_json)),
+        ])
+        .to_string(),
+    )
+}
+
+/// 批量拉黑
+fn admin_blacklist_batch(ctx: &ServerCtx, req: &Request) -> Response {
+    let body = String::from_utf8_lossy(&req.body);
+    let params = crate::json::parse(&body).unwrap_or(Json::obj());
+    let mut n = 0usize;
+    if let Some(arr) = params.get("domains").and_then(|v| v.as_arr()) {
+        for d in arr {
+            if let Some(domain) = d.as_str() {
+                if !domain.trim().is_empty() {
+                    ctx.engine.blacklist.add(domain.trim(), "manual");
+                    n += 1;
+                }
+            }
+        }
+    }
+    ctx.engine.clear_cache();
+    Response::json(200, &Json::build(vec![("status", Json::str("ok")), ("added", Json::num(n as f64))]).to_string())
+}
+
+/// 一键清理:批量拉黑 + 删除站点目录(计数去重保留的重复站)+ 重建索引
+fn admin_cleanup(ctx: &ServerCtx, req: &Request) -> Response {
+    let body = String::from_utf8_lossy(&req.body);
+    let params = crate::json::parse(&body).unwrap_or(Json::obj());
+    let mut removed = 0usize;
+    let sites_dir = crate::config::sites_dir();
+    let crawled_dir = crawl_out_dir();
+    if let Some(arr) = params.get("domains").and_then(|v| v.as_arr()) {
+        for d in arr {
+            if let Some(domain) = d.as_str() {
+                let domain = domain.trim();
+                if domain.is_empty() {
+                    continue;
+                }
+                ctx.engine.blacklist.add(domain, "manual");
+                // 删除站点目录(主目录 + 爬虫目录)
+                for base in [&sites_dir, &crawled_dir] {
+                    let dir = base.join(domain);
+                    if dir.exists() {
+                        let _ = std::fs::remove_dir_all(&dir);
+                        removed += 1;
+                    }
+                }
+            }
+        }
+    }
+    ctx.engine.clear_cache();
+    // 重建索引
+    let sites = ctx.engine.rebuild(&sites_dir, &crate::config::index_dir()).unwrap_or(0);
+    Response::json(
+        200,
+        &Json::build(vec![
+            ("status", Json::str("ok")),
+            ("removed_dirs", Json::num(removed as f64)),
+            ("sites", Json::num(sites as f64)),
+        ])
+        .to_string(),
+    )
+}
+
+/// 统计:搜索热词/总量/每日/关键词(索引词条数)
+fn admin_stats(ctx: &ServerCtx) -> Response {
+    let idx = ctx.engine.index().lock().unwrap();
+    let (sites, terms, blocks) = idx.stats();
+    drop(idx);
+    let (hits, misses) = ctx.engine.cache_stats();
+    let top: Vec<Json> = ctx
+        .stats
+        .top_queries(30)
+        .iter()
+        .map(|(q, n)| Json::build(vec![("query", Json::str(q)), ("count", Json::num(*n as f64))]))
+        .collect();
+    let daily: Vec<Json> = ctx
+        .stats
+        .daily_stats()
+        .iter()
+        .map(|(d, n)| Json::build(vec![("date", Json::str(d)), ("count", Json::num(*n as f64))]))
+        .collect();
+    Response::json(
+        200,
+        &Json::build(vec![
+            ("total_searches", Json::num(ctx.stats.total() as f64)),
+            ("top_queries", Json::arr(top)),
+            ("daily", Json::arr(daily)),
+            ("index_sites", Json::num(sites as f64)),
+            ("index_terms", Json::num(terms as f64)),
+            ("index_blocks", Json::num(blocks as f64)),
+            ("cache_hit_rate", Json::num(if hits + misses > 0 { hits as f64 / (hits + misses) as f64 } else { 0.0 })),
+            ("crawler_workers", Json::num(ctx.crawler.worker_count() as f64)),
+        ])
+        .to_string(),
+    )
+}
+
+/// favicon:内存缓存返回图片;未缓存则懒抓取(失败返回占位)
+fn api_favicon(ctx: &ServerCtx, domain: &str) -> Response {
+    let domain = domain.trim().to_lowercase();
+    if domain.is_empty() {
+        return Response::json(404, r#"{"error":"缺少域名"}"#);
+    }
+    // 懒加载:未缓存则尝试抓取 favicon.ico
+    if ctx.crawler.favicon(&domain).is_none() {
+        ctx.crawler.ensure_favicon(&domain);
+    }
+    if let Some(bytes) = ctx.crawler.favicon(&domain) {
+        crate::http::Response {
+            status: 200,
+            content_type: "image/x-icon",
+            body: bytes,
+            extra_headers: vec![("Cache-Control".to_string(), "public, max-age=3600".to_string())],
+        }
+    } else {
+        crate::http::Response {
+            status: 200,
+            content_type: "image/svg+xml",
+            body: crate::http::FAVICON_PLACEHOLDER.as_bytes().to_vec(),
+            extra_headers: vec![],
+        }
+    }
+}
+
+/// 爬虫输出目录
+fn crawl_out_dir() -> std::path::PathBuf {
+    crate::config::sites_dir()
+        .parent()
+        .map(|p| p.join("crawled"))
+        .unwrap_or_else(|| std::path::PathBuf::from("out/crawled"))
+}
+
+/// 白名单域名(whitelist.sorl 国内基础名单;桌面文件缺失时返回空)
+fn whitelist_domains() -> Vec<String> {
+    let candidates = [
+        "C:\\Users\\Admin\\OneDrive\\Desktop\\whitelist.sorl",
+        "whitelist.sorl",
+        "config\\whitelist.sorl",
+    ];
+    for path in candidates {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let domains = crate::crawler::parse_whitelist(&text);
+            if !domains.is_empty() {
+                return domains;
+            }
+        }
+    }
+    Vec::new()
 }
 
 fn admin_crawl_status(ctx: &ServerCtx) -> Response {
@@ -637,7 +917,7 @@ fn run_task(ctx: &Arc<ServerCtx>, task: &crate::tasks::Task) {
             if seeds.is_empty() {
                 println!("[task] 定时爬虫跳过(无种子,先重建索引发现外链)");
             } else {
-                let crawled_dir = crate::config::sites_dir().parent().map(|p| p.join("crawled")).unwrap_or_else(|| std::path::PathBuf::from("out/crawled"));
+                let crawled_dir = crawl_out_dir();
                 let stats = ctx.crawler.crawl(&seeds, &crawled_dir);
                 println!("[task] 爬虫完成: 抓取 {} 发现 {} 失败 {} ({:.0}s)", stats.fetched, stats.discovered, stats.failed, stats.elapsed_secs);
                 // 爬完重建索引收录新站

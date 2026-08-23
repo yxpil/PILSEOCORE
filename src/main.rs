@@ -7,7 +7,7 @@
 //!   search <关键词>     CLI 搜索
 //!   mcp                启动 MCP Server(stdio,供 AI 客户端调用)
 
-use pilseocore::{ai, auth, blacklist, config, crawler, dns, engine, http, index, mcp, search, server, tasks, tokenizer};
+use pilseocore::{ai, auth, blacklist, config, crawler, dns, engine, http, index, mcp, search, server, stats, tasks, tokenizer};
 
 use std::process::exit;
 use std::sync::Arc;
@@ -249,9 +249,10 @@ fn cmd_serve(args: &[String]) -> Result<(), String> {
 
     let tokens = auth::TokenStore::load(std::path::Path::new("data"));
     let sessions = auth::Sessions::new(12 * 3600); // 会话 12 小时
-    // 爬虫与定时任务
-    let crawler = Arc::new(crawler::Crawler::new(3, 2000, 100, 5000));
+    // 爬虫(CPU 自适应并发)、定时任务、搜索统计
+    let crawler = Arc::new(crawler::Crawler::new(3, 5000, 200, 5000, 0));
     let tasks = Arc::new(tasks::TaskScheduler::load(&config::index_dir()));
+    let stats = Arc::new(stats::StatsCollector::new(&config::index_dir()));
     let ctx = Arc::new(server::ServerCtx::new(
         engine,
         ai_cfg,
@@ -261,6 +262,7 @@ fn cmd_serve(args: &[String]) -> Result<(), String> {
         sessions,
         crawler,
         tasks,
+        stats,
     ));
     println!("[tasks] 定时任务调度线程运行中(管理后台'定时任务'可添加)");
     server::spawn_scheduler(&ctx);

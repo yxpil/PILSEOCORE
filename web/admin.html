@@ -100,6 +100,8 @@
       <div class="nav-item" data-view="config" onclick="switchView('config')">后缀与 DNS</div>
       <div class="nav-item" data-view="crawl" onclick="switchView('crawl')">爬虫</div>
       <div class="nav-item" data-view="tasks" onclick="switchView('tasks')">定时任务</div>
+      <div class="nav-item" data-view="duplicates" onclick="switchView('duplicates')">重复清理</div>
+      <div class="nav-item" data-view="stats" onclick="switchView('stats')">统计</div>
       <div class="nav-item" data-view="tokens" onclick="switchView('tokens')">API Token</div>
       <div class="nav-item" data-view="blacklist" onclick="switchView('blacklist')">黑名单</div>
     </nav>
@@ -158,13 +160,60 @@
     <!-- 爬虫 -->
     <section id="view-crawl" class="view">
       <h2>爬虫</h2>
-      <div class="sub">从外链发现/手动种子出发 BFS 抓取,遵守 robots.txt,发现更多网站;抓取结果存入 out/crawled 并重建索引收录</div>
+      <div class="sub">种子 = 白名单(whitelist.sorl 国内基础名单)+ 外链发现 + 手动添加;链式解析友链的友链,子 URL 独立收录;遵守 robots.txt,无 sitemap 或禁止访问的站点不编入</div>
       <div class="card">
-        <h3>手动触发抓取</h3>
-        <label style="margin-top:0">附加种子(每行一个域名或 URL,留空则仅用外链发现)</label>
+        <h3>手动添加域名(自动解析 + 收录)</h3>
+        <div class="row">
+          <div style="flex:3"><input type="text" id="addSiteInput" placeholder="域名或 URL,如 novel-site.com 或 http://192.168.1.10/"></div>
+          <div style="flex:1"><button class="btn sm" onclick="addSite()">添加并解析</button></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>批量抓取控制</h3>
+        <div class="row">
+          <div style="flex:1"><label style="margin-top:0">深度</label><input type="number" id="crawlDepth" value="3" min="1" max="10"></div>
+          <div style="flex:1"><label style="margin-top:0">最大页数</label><input type="number" id="crawlMaxPages" value="2000" min="10"></div>
+          <div style="flex:1"><label style="margin-top:0">每域上限</label><input type="number" id="crawlPerDomain" value="100" min="1"></div>
+          <div style="flex:1"><label style="margin-top:0">并发数(0=CPU自适应)</label><input type="number" id="crawlWorkers" value="0" min="0" max="128"></div>
+        </div>
+        <label style="margin-top:12px">附加种子(每行一个域名或 URL)</label>
         <textarea id="crawlSeeds" placeholder="friend-site.com&#10;http://192.168.1.10/"></textarea>
         <button class="btn" style="margin-top:10px" onclick="startCrawl()">开始抓取</button>
         <div class="state-line" id="crawlStats" style="margin-top:10px"></div>
+      </div>
+    </section>
+
+    <!-- 重复清理 -->
+    <section id="view-duplicates" class="view">
+      <h2>重复清理</h2>
+      <div class="sub">相同标题的站点分组列出,支持多选批量拉黑或一键清理(拉黑 + 删除站点目录 + 重建索引)</div>
+      <div class="card">
+        <div style="display:flex; gap:10px; align-items:center; margin-bottom:10px">
+          <label style="margin:0"><input type="checkbox" id="dupAll" onchange="toggleDupAll()"> 全选</label>
+          <button class="btn sm" onclick="batchBlacklist()">批量拉黑</button>
+          <button class="btn sm sec" onclick="cleanupSelected()">一键清理</button>
+          <span class="tag" id="dupCountInfo"></span>
+        </div>
+        <div id="dupList"></div>
+        <div style="display:flex; gap:6px; justify-content:center; margin-top:12px" id="dupPager"></div>
+      </div>
+    </section>
+
+    <!-- 统计 -->
+    <section id="view-stats" class="view">
+      <h2>统计</h2>
+      <div class="sub">搜索热词、每日搜索量、索引规模、缓存命中率(内存聚合,周期落盘)</div>
+      <div class="card">
+        <h3>搜索热词 TOP 30</h3>
+        <div id="hotQueries" class="kw-list"></div>
+      </div>
+      <div class="card">
+        <h3>每日搜索量</h3>
+        <div id="dailyStats" class="kw-list"></div>
+      </div>
+      <div class="card">
+        <h3>索引与性能</h3>
+        <div id="perfStats" class="state-line" style="margin:0"></div>
       </div>
     </section>
 
@@ -271,6 +320,8 @@ function switchView(v) {
   if (v === 'blacklist') loadBlacklist(1);
   if (v === 'crawl') pollCrawl();
   if (v === 'tasks') loadTasks();
+  if (v === 'duplicates') loadDuplicates(1);
+  if (v === 'stats') loadStats();
   if (v === 'overview') { loadOverview(); pollScan(); }
   if (v === 'scan') pollScan();
 }
@@ -383,14 +434,33 @@ function revokeToken(id) {
 }
 
 /* ============ 爬虫 ============ */
+function addSite() {
+  var d = document.getElementById('addSiteInput').value.trim();
+  if (!d) { setMsg('msg', '请输入域名或 URL', 'err'); return; }
+  adminFetch('/api/admin/add-site', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({domain: d})
+  }).then(function(r){ return r.json().then(function(x){ return {status:r.status, x:x}; }); }).then(function(res){
+    setMsg('msg', res.status === 202 ? '已添加 ' + res.x.domain + ',后台抓取并自动收录中...' : ('失败: ' + (res.x.error || res.status)), res.status === 202 ? 'ok' : 'err');
+    document.getElementById('addSiteInput').value = '';
+  }).catch(function(e){ setMsg('msg', '请求失败: ' + e, 'err'); });
+}
+
 function startCrawl() {
   var seeds = document.getElementById('crawlSeeds').value.split('\n').map(function(s){ return s.trim(); }).filter(function(s){ return s; });
+  var body = {
+    seeds: seeds,
+    depth: parseInt(document.getElementById('crawlDepth').value, 10) || 3,
+    max_pages: parseInt(document.getElementById('crawlMaxPages').value, 10) || 2000,
+    per_domain: parseInt(document.getElementById('crawlPerDomain').value, 10) || 100,
+    workers: parseInt(document.getElementById('crawlWorkers').value, 10) || 0
+  };
   setMsg('msg', '爬虫已启动(后台抓取)...', 'warn');
   adminFetch('/api/admin/crawl', {
     method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({seeds: seeds})
+    body: JSON.stringify(body)
   }).then(function(r){ return r.json().then(function(d){ return {status:r.status, d:d}; }); }).then(function(res){
-    if (res.status === 202) setMsg('msg', '爬虫已启动: ' + res.d.seeds + ' 个种子', 'ok');
+    if (res.status === 202) setMsg('msg', '爬虫已启动: ' + res.d.seeds + ' 个种子,并发 ' + res.d.workers, 'ok');
     else setMsg('msg', '启动失败: ' + (res.d.error || res.status), 'err');
     pollCrawl();
   }).catch(function(e){ setMsg('msg', '请求失败: ' + e, 'err'); });
@@ -451,6 +521,79 @@ function removeTask(id) {
     setMsg('msg', r.status === 200 ? '已删除' : '删除失败', r.status === 200 ? 'ok' : 'err');
     loadTasks();
   });
+}
+
+/* ============ 重复清理(多选批量) ============ */
+var dupChecked = {};
+function loadDuplicates(page) {
+  page = page || 1;
+  dupChecked = {};
+  adminFetch('/api/admin/duplicates?page=' + page + '&limit=20').then(function(r){ return r.json(); }).then(function(d){
+    var groups = d.groups || [];
+    var el = document.getElementById('dupList');
+    var info = document.getElementById('dupCountInfo');
+    if (!groups.length) { el.innerHTML = '<div class="sub" style="margin:0">暂无重复标题</div>'; info.textContent = ''; return; }
+    info.textContent = '共 ' + d.count + ' 组重复';
+    el.innerHTML = groups.map(function(g, gi){
+      var rows = g.domains.map(function(s){
+        return '<label class="dup-row"><input type="checkbox" class="dup-cb" data-domain="' + esc(s.domain) + '" onchange="dupSel()"> ' +
+          '<span class="tag">' + esc(s.domain) + '</span><span class="url-text">' + esc(s.url) + '</span></label>';
+      }).join('');
+      return '<div class="card" style="margin-bottom:10px; padding:12px"><b>' + esc(g.title) + ' <span class="tag">' + g.count + ' 个</span></b>' + rows + '</div>';
+    }).join('');
+    var pg = document.getElementById('dupPager');
+    pg.innerHTML = '';
+    if (d.pages > 1) {
+      if (page > 1) pg.innerHTML += '<a class="link" onclick="loadDuplicates(' + (page-1) + ')">上一页</a>';
+      pg.innerHTML += '<span class="tag">' + page + ' / ' + d.pages + '</span>';
+      if (page < d.pages) pg.innerHTML += '<a class="link" onclick="loadDuplicates(' + (page+1) + ')">下一页</a>';
+    }
+  }).catch(function(){});
+}
+function dupSel() { dupChecked = {}; document.querySelectorAll('.dup-cb:checked').forEach(function(c){ dupChecked[c.getAttribute('data-domain')] = true; }); }
+function toggleDupAll() {
+  var all = document.getElementById('dupAll').checked;
+  document.querySelectorAll('.dup-cb').forEach(function(c){ c.checked = all; });
+  dupSel();
+}
+function batchBlacklist() {
+  var domains = Object.keys(dupChecked);
+  if (!domains.length) { setMsg('msg', '请先勾选要拉黑的站点', 'err'); return; }
+  adminFetch('/api/admin/blacklist/batch', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({domains: domains})
+  }).then(function(r){ return r.json().then(function(x){ return {status:r.status, x:x}; }); }).then(function(res){
+    setMsg('msg', res.status === 200 ? '已批量拉黑 ' + res.x.added + ' 个域名' : ('失败: ' + (res.x.error || res.status)), res.status === 200 ? 'ok' : 'err');
+    loadDuplicates(1);
+  }).catch(function(e){ setMsg('msg', '请求失败: ' + e, 'err'); });
+}
+function cleanupSelected() {
+  var domains = Object.keys(dupChecked);
+  if (!domains.length) { setMsg('msg', '请先勾选要清理的站点', 'err'); return; }
+  if (!confirm('一键清理 ' + domains.length + ' 个站点?将拉黑 + 删除站点目录 + 重建索引(耗时较长)')) return;
+  setMsg('msg', '清理中,请稍候(重建索引可能需要几分钟)...', 'warn');
+  adminFetch('/api/admin/cleanup', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({domains: domains})
+  }).then(function(r){ return r.json().then(function(x){ return {status:r.status, x:x}; }); }).then(function(res){
+    setMsg('msg', res.status === 200 ? '清理完成: 删除 ' + res.x.removed_dirs + ' 个目录,索引 ' + res.x.sites + ' 站' : ('失败: ' + (res.x.error || res.status)), res.status === 200 ? 'ok' : 'err');
+    loadDuplicates(1);
+  }).catch(function(e){ setMsg('msg', '请求失败: ' + e, 'err'); });
+}
+
+/* ============ 统计 ============ */
+function loadStats() {
+  adminFetch('/api/admin/stats').then(function(r){ return r.json(); }).then(function(s){
+    var q = document.getElementById('hotQueries');
+    if (!s.top_queries.length) q.innerHTML = '<div class="sub" style="margin:0">暂无搜索记录</div>';
+    else q.innerHTML = s.top_queries.map(function(t, i){ return '<div class="kw-item"><span class="rank">' + (i+1) + '</span>' + esc(t.query) + ' <span class="tag">' + t.count + ' 次</span></div>'; }).join('');
+    var d = document.getElementById('dailyStats');
+    if (!s.daily.length) d.innerHTML = '<div class="sub" style="margin:0">暂无数据</div>';
+    else d.innerHTML = s.daily.map(function(t){ return '<div class="kw-item"><span class="tag">' + esc(t.date) + '</span> ' + t.count + ' 次搜索</div>'; }).join('');
+    document.getElementById('perfStats').innerHTML =
+      '总搜索 ' + s.total_searches + ' 次 · 索引 ' + s.index_sites + ' 站 / ' + s.index_terms + ' 词 / ' + s.index_blocks + ' 分块 · ' +
+      '缓存命中率 ' + Math.round(s.cache_hit_rate * 100) + '% · 爬虫并发 ' + s.crawler_workers;
+  }).catch(function(){});
 }
 
 /* ============ 黑名单 ============ */
