@@ -187,7 +187,21 @@ pub fn load_config(path: &Path) -> Result<Config, String> {
 fn parse_bool(s: &str) -> Result<bool, ()> {
     match s.trim().to_lowercase().as_str() {
         "true" | "1" | "yes" | "on" => Ok(true),
-        "false" | "0" | "no" | "off" => Ok(false),
+        "false" | "0" | "no" | "off" | "" => Ok(false),
         _ => Err(()),
     }
+}
+
+/// 站点输出目录(支持 PILSEO_SITES_DIR 环境变量覆盖,便于嵌入式/测试)
+pub fn sites_dir() -> std::path::PathBuf {
+    std::env::var("PILSEO_SITES_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("out/sites"))
+}
+
+/// 索引数据目录(支持 PILSEO_INDEX_DIR 环境变量覆盖)
+pub fn index_dir() -> std::path::PathBuf {
+    std::env::var("PILSEO_INDEX_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("data/index"))
 }

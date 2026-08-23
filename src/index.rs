@@ -6,7 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use crate::blacklist::Blacklist;
 use crate::json::Json;
+use crate::tokenizer::BpeTokenizer;
 
 #[derive(Clone, Debug)]
 pub struct DocMeta {
@@ -17,18 +19,85 @@ pub struct DocMeta {
     pub url: String,
 }
 
-/// 分块倒排索引(按词首字符分块: 0-9 a-z _)
+/// 分块倒排索引(按词首字符分块: 0-9 a-z _)+ BPE 分词器
 pub struct SiteIndex {
     pub docs: Vec<DocMeta>,
     pub blocks: Mutex<HashMap<u8, HashMap<String, Vec<usize>>>>,
     data_dir: PathBuf,
+    /// BPE 分词器(索引与查询共享同一词表)
+    pub tokenizer: BpeTokenizer,
 }
 
+/// 文档元数据分片大小(每片 N 个文档,避免单文件过大)
+const DOCS_PER_CHUNK: usize = 256;
+
 impl SiteIndex {
-    /// 全量重建索引:扫描 sites_dir 下所有站点,提取内容并生成 sitemap.xml
-    pub fn build(sites_dir: &Path, data_dir: &Path) -> Result<SiteIndex, String> {
+    /// 从内存文档直接构造(测试/嵌入式使用,不落盘;同步构建倒排索引)
+    pub fn from_docs(docs: Vec<DocMeta>) -> SiteIndex {
+        SiteIndex::from_docs_with_tokenizer(docs, BpeTokenizer::train(&[], 300))
+    }
+
+    /// 从内存文档 + 指定分词器构造(测试用,语料训练的 BPE 更接近真实)
+    pub fn from_docs_with_tokenizer(docs: Vec<DocMeta>, tokenizer: BpeTokenizer) -> SiteIndex {
+        let mut blocks: HashMap<u8, HashMap<String, Vec<usize>>> = HashMap::new();
+        for (doc_id, doc) in docs.iter().enumerate() {
+            let mut text = String::new();
+            text.push_str(&doc.title);
+            text.push(' ');
+            text.push_str(&doc.description);
+            text.push(' ');
+            text.push_str(&doc.domain);
+            for kw in &doc.keywords {
+                text.push(' ');
+                text.push_str(kw);
+            }
+            let mut seen = HashSet::new();
+            for term in tokenizer.tokenize_str(&text) {
+                if !seen.insert(term.clone()) {
+                    continue;
+                }
+                let chunk = chunk_of(&term);
+                blocks.entry(chunk).or_default().entry(term).or_default().push(doc_id);
+            }
+        }
+        SiteIndex {
+            docs,
+            blocks: Mutex::new(blocks),
+            data_dir: PathBuf::from(""),
+            tokenizer,
+        }
+    }
+
+    /// 全量重建索引:
+    /// 1. 训练/加载 BPE 分词器(81920 词表)
+    /// 2. 扫描站点,通过 sitemap + <a> 标签发现站内全部页面(不只 index.html)
+    /// 3. 内容指纹去重/雷同检测,重复劣质域名自动拉黑
+    /// 4. 提取标题/meta,构建分块倒排索引,生成 sitemap.xml
+    pub fn build(sites_dir: &Path, data_dir: &Path, blacklist: &Blacklist) -> Result<SiteIndex, String> {
+        // ---- 1. 训练/加载分词器 ----
+        let vocab_path = data_dir.join("tokenizer").join("vocab.json");
+        let tokenizer = if vocab_path.exists() {
+            match BpeTokenizer::load(&vocab_path) {
+                Some(t) => t,
+                None => {
+                    let corpus = collect_corpus(sites_dir);
+                    let t = BpeTokenizer::train(&corpus, crate::tokenizer::VOCAB_SIZE);
+                    let _ = t.save(&vocab_path);
+                    t
+                }
+            }
+        } else {
+            let corpus = collect_corpus(sites_dir);
+            let t = BpeTokenizer::train(&corpus, crate::tokenizer::VOCAB_SIZE);
+            let _ = t.save(&vocab_path);
+            t
+        };
+        println!("[index] 分词器: {} tokens", tokenizer.vocab_size());
+
+        // ---- 2/3/4. 扫描站点建索引 ----
         let mut docs = Vec::new();
         let mut blocks: HashMap<u8, HashMap<String, Vec<usize>>> = HashMap::new();
+        let mut blocked = 0usize;
 
         if sites_dir.exists() {
             let entries = fs::read_dir(sites_dir)
@@ -47,40 +116,59 @@ impl SiteIndex {
                     Ok(h) => h,
                     Err(_) => continue,
                 };
-                let title = extract_title(&html).unwrap_or_else(|| domain.clone());
-                let description = extract_meta(&html, "description").unwrap_or_default();
-                let keywords = extract_keywords(&html);
-                let url = format!("https://{}/", domain);
-                let doc_id = docs.len();
-                docs.push(DocMeta {
-                    domain: domain.clone(),
-                    title,
-                    description,
-                    keywords: keywords.clone(),
-                    url,
-                });
-                // 分词入倒排
-                let mut text = String::new();
-                text.push_str(&docs[doc_id].title);
-                text.push(' ');
-                text.push_str(&docs[doc_id].description);
-                text.push(' ');
-                text.push_str(&domain);
-                for kw in &keywords {
+                // 内容指纹:主页文本(去重/雷同检测)
+                let main_text = extract_page_text(&html);
+                if !blacklist.check_before_index(&domain, &main_text) {
+                    blocked += 1;
+                    continue;
+                }
+                // 发现站内全部页面(.html,含子目录)
+                let pages = discover_pages(&dir);
+                let mut page_urls: Vec<String> = Vec::new();
+                for (rel, page_html) in &pages {
+                    let title = extract_title(page_html).unwrap_or_else(|| domain.clone());
+                    let description = extract_meta(page_html, "description").unwrap_or_default();
+                    let keywords = extract_keywords(page_html);
+                    let url = if rel.is_empty() {
+                        format!("https://{}/", domain)
+                    } else {
+                        format!("https://{}/{}", domain, rel)
+                    };
+                    page_urls.push(url.clone());
+                    let doc_id = docs.len();
+                    docs.push(DocMeta {
+                        domain: domain.clone(),
+                        title,
+                        description,
+                        keywords: keywords.clone(),
+                        url,
+                    });
+                    // 分词入倒排
+                    let mut text = String::new();
+                    text.push_str(&docs[doc_id].title);
                     text.push(' ');
-                    text.push_str(kw);
-                }
-                let mut seen: HashSet<String> = HashSet::new();
-                for term in tokenize(&text) {
-                    if !seen.insert(term.clone()) {
-                        continue;
+                    text.push_str(&docs[doc_id].description);
+                    text.push(' ');
+                    text.push_str(&domain);
+                    for kw in &keywords {
+                        text.push(' ');
+                        text.push_str(kw);
                     }
-                    let chunk = chunk_of(&term);
-                    blocks.entry(chunk).or_default().entry(term).or_default().push(doc_id);
+                    let mut seen: HashSet<String> = HashSet::new();
+                    for term in tokenizer.tokenize_str(&text) {
+                        if !seen.insert(term.clone()) {
+                            continue;
+                        }
+                        let chunk = chunk_of(&term);
+                        blocks.entry(chunk).or_default().entry(term).or_default().push(doc_id);
+                    }
                 }
-                // 生成 sitemap.xml
-                let _ = gen_sitemap(&dir, &domain, &html);
+                // 生成 sitemap.xml(主页 + <a> 发现 + 发现的页面)
+                let _ = gen_sitemap(&dir, &domain, &html, &page_urls);
             }
+        }
+        if blocked > 0 {
+            println!("[index] 自动拉黑雷同/重复域名: {} 个", blocked);
         }
 
         fs::create_dir_all(data_dir).map_err(|e| format!("创建索引目录失败: {}", e))?;
@@ -89,75 +177,58 @@ impl SiteIndex {
             docs,
             blocks: Mutex::new(blocks),
             data_dir: data_dir.to_path_buf(),
+            tokenizer,
         };
         index.save()?;
         Ok(index)
     }
 
-    /// 从磁盘加载(懒加载:先读文档元数据,分块文件按需读入)
+    /// 从磁盘加载(懒加载:先读文档元数据分片,分块文件按需读入)
     pub fn load(data_dir: &Path) -> Result<SiteIndex, String> {
-        let meta_path = data_dir.join("meta.json");
-        let docs_path = data_dir.join("docs.json");
-        let docs = if docs_path.exists() {
-            let text = fs::read_to_string(&docs_path).map_err(|e| format!("读取 {} 失败: {}", docs_path.display(), e))?;
-            let j = crate::json::parse(&text).map_err(|e| format!("解析 {} 失败: {}", docs_path.display(), e))?;
-            let mut docs = Vec::new();
-            if let Some(arr) = j.as_arr() {
-                for item in arr {
-                    let domain = item.get("domain").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let description = item.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let mut keywords = Vec::new();
-                    if let Some(ks) = item.get("keywords").and_then(|v| v.as_arr()) {
-                        for k in ks {
-                            if let Some(s) = k.as_str() {
-                                keywords.push(s.to_string());
-                            }
-                        }
-                    }
-                    docs.push(DocMeta { domain, title, description, keywords, url });
-                }
-            }
-            docs
-        } else {
-            Vec::new()
-        };
-        let _ = meta_path; // meta 仅供展示,加载时忽略
+        let docs = load_docs(data_dir);
+        let tokenizer = BpeTokenizer::load(&data_dir.join("tokenizer").join("vocab.json"))
+            .unwrap_or_else(|| BpeTokenizer::train(&[], 300));
         Ok(SiteIndex {
             docs,
             blocks: Mutex::new(HashMap::new()),
             data_dir: data_dir.to_path_buf(),
+            tokenizer,
         })
     }
 
-    /// 持久化索引到磁盘
+    /// 持久化索引到磁盘(文档元数据分片存储,每片 DOCS_PER_CHUNK 个)
     pub fn save(&self) -> Result<(), String> {
-        // docs.json
-        let arr: Vec<Json> = self
-            .docs
-            .iter()
-            .map(|d| {
-                Json::build(vec![
-                    ("domain", Json::str(&d.domain)),
-                    ("title", Json::str(&d.title)),
-                    ("description", Json::str(&d.description)),
-                    ("keywords", Json::arr(d.keywords.iter().map(|k| Json::str(k)).collect())),
-                    ("url", Json::str(&d.url)),
-                ])
-            })
-            .collect();
-        fs::write(self.data_dir.join("docs.json"), Json::arr(arr).to_string())
-            .map_err(|e| format!("写入 docs.json 失败: {}", e))?;
+        // docs 分片:docs_000.json / docs_001.json ...(避免单文件过大)
+        let mut chunk: Vec<Json> = Vec::with_capacity(DOCS_PER_CHUNK);
+        let mut chunk_idx: usize = 0;
+        for d in &self.docs {
+            chunk.push(Json::build(vec![
+                ("domain", Json::str(&d.domain)),
+                ("title", Json::str(&d.title)),
+                ("description", Json::str(&d.description)),
+                ("keywords", Json::arr(d.keywords.iter().map(|k| Json::str(k)).collect())),
+                ("url", Json::str(&d.url)),
+            ]));
+            if chunk.len() >= DOCS_PER_CHUNK {
+                write_docs_chunk(&self.data_dir, chunk_idx, &chunk)?;
+                chunk.clear();
+                chunk_idx += 1;
+            }
+        }
+        if !chunk.is_empty() {
+            write_docs_chunk(&self.data_dir, chunk_idx, &chunk)?;
+        }
+        // 清理旧式单文件(如果存在)
+        let _ = fs::remove_file(self.data_dir.join("docs.json"));
         // 每块一个文件
         let blocks = self.blocks.lock().unwrap();
         let dir = self.data_dir.join("blocks");
-        for (chunk, terms) in blocks.iter() {
+        for (chunk_b, terms) in blocks.iter() {
             let mut m = BTreeMap::new();
             for (term, ids) in terms.iter() {
                 m.insert(term.clone(), Json::arr(ids.iter().map(|&i| Json::num(i as f64)).collect()));
             }
-            fs::write(dir.join(format!("block_{:02}.json", chunk_name(*chunk))), Json::Obj(m).to_string())
+            fs::write(dir.join(format!("block_{:02}.json", chunk_name(*chunk_b))), Json::Obj(m).to_string())
                 .map_err(|e| format!("写入分块失败: {}", e))?;
         }
         // meta.json
@@ -165,6 +236,7 @@ impl SiteIndex {
             ("version", Json::num(1.0)),
             ("sites", Json::num(self.docs.len() as f64)),
             ("blocks", Json::num(blocks.len() as f64)),
+            ("docs_chunks", Json::num(chunk_idx as f64)),
             ("built_at", Json::str(now_rfc3339())),
         ]);
         fs::write(self.data_dir.join("meta.json"), meta.to_string())
@@ -215,6 +287,67 @@ fn chunk_name(c: u8) -> String {
     } else {
         (c as char).to_string()
     }
+}
+
+/// 写入一个文档分片文件 docs_XXX.json
+fn write_docs_chunk(data_dir: &Path, idx: usize, chunk: &[Json]) -> Result<(), String> {
+    let path = data_dir.join(format!("docs_{:03}.json", idx));
+    fs::write(path, Json::arr(chunk.to_vec()).to_string())
+        .map_err(|e| format!("写入文档分片失败: {}", e))
+}
+
+/// 从磁盘加载全部文档元数据(支持分片 docs_XXX.json 与旧式单文件 docs.json)
+fn load_docs(data_dir: &Path) -> Vec<DocMeta> {
+    let mut docs = Vec::new();
+    // 优先读分片文件
+    let mut any_chunk = false;
+    let mut idx = 0usize;
+    loop {
+        let path = data_dir.join(format!("docs_{:03}.json", idx));
+        if !path.exists() {
+            break;
+        }
+        any_chunk = true;
+        if let Some(mut chunk) = parse_docs_file(&path) {
+            docs.append(&mut chunk);
+        }
+        idx += 1;
+    }
+    if !any_chunk {
+        // 兼容旧式单文件 docs.json
+        let legacy = data_dir.join("docs.json");
+        if legacy.exists() {
+            if let Some(mut chunk) = parse_docs_file(&legacy) {
+                docs.append(&mut chunk);
+            }
+        }
+    }
+    docs
+}
+
+/// 解析一个文档 JSON 文件(数组)为 DocMeta 列表
+fn parse_docs_file(path: &Path) -> Option<Vec<DocMeta>> {
+    let text = fs::read_to_string(path).ok()?;
+    let j = crate::json::parse(&text).ok()?;
+    let arr = j.as_arr()?;
+    Some(
+        arr.iter()
+            .filter_map(|item| {
+                Some(DocMeta {
+                    domain: item.get("domain")?.as_str()?.to_string(),
+                    title: item.get("title")?.as_str()?.to_string(),
+                    description: item.get("description")?.as_str()?.to_string(),
+                    url: item.get("url")?.as_str()?.to_string(),
+                    keywords: item
+                        .get("keywords")?
+                        .as_arr()?
+                        .iter()
+                        .filter_map(|k| k.as_str().map(|s| s.to_string()))
+                        .collect(),
+                })
+            })
+            .collect(),
+    )
 }
 
 pub fn chunk_of(word: &str) -> u8 {
@@ -333,9 +466,80 @@ fn extract_keywords(html: &str) -> Vec<String> {
     out
 }
 
-/// 为站点生成 sitemap.xml
-fn gen_sitemap(site_dir: &Path, domain: &str, html: &str) -> Result<(), String> {
-    // 提取站内链接(本地 SEO 站通常只有主页,也扫描 <a href>)
+/// 收集语料(用于 BPE 训练):站点主页文本 + 关键词,去重由训练器完成
+pub fn collect_corpus(sites_dir: &Path) -> Vec<String> {
+    let mut corpus: Vec<String> = Vec::new();
+    if sites_dir.exists() {
+        let mut count = 0;
+        if let Ok(entries) = fs::read_dir(sites_dir) {
+            for entry in entries.flatten() {
+                let dir = entry.path();
+                if !dir.is_dir() {
+                    continue;
+                }
+                let html_path = dir.join("index.html");
+                if let Ok(html) = fs::read_to_string(&html_path) {
+                    corpus.push(extract_page_text(&html));
+                    count += 1;
+                    if count >= 10_000 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    // 关键词补充(保证核心词在词表中)
+    if let Ok(kws) = crate::config::load_space_list(Path::new("config/keywords.txt")) {
+        corpus.extend(kws);
+    }
+    corpus
+}
+
+/// 发现站内全部页面:递归遍历 .html 文件,返回 (相对路径, HTML 内容)
+/// 相对路径为空表示 index.html(主页)
+fn discover_pages(dir: &Path) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    fn walk(dir: &Path, rel: &str, out: &mut Vec<(String, String)>) {
+        let Ok(entries) = fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                let sub = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let next_rel = if rel.is_empty() { sub } else { format!("{}/{}", rel, sub) };
+                walk(&p, &next_rel, out);
+            } else if p.extension().map(|e| e == "html").unwrap_or(false) {
+                let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let rel_path = if rel.is_empty() { name } else { format!("{}/{}", rel, name) };
+                if let Ok(h) = fs::read_to_string(&p) {
+                    out.push((rel_path, h));
+                }
+            }
+        }
+    }
+    walk(dir, "", &mut out);
+    out
+}
+
+/// 提取页面文本(标题+描述+关键词),用于内容指纹
+fn extract_page_text(html: &str) -> String {
+    let mut s = String::new();
+    if let Some(t) = extract_title(html) {
+        s.push_str(&t);
+    }
+    if let Some(d) = extract_meta(html, "description") {
+        s.push(' ');
+        s.push_str(&d);
+    }
+    for kw in extract_keywords(html) {
+        s.push(' ');
+        s.push_str(&kw);
+    }
+    s
+}
+
+/// 为站点生成 sitemap.xml(主页 + <a> 链接发现 + 发现的页面)
+fn gen_sitemap(site_dir: &Path, domain: &str, html: &str, discovered: &[String]) -> Result<(), String> {
+    // 从 <a href> 提取站内链接
     let mut urls: Vec<String> = vec![format!("https://{}/", domain)];
     let lower = html.to_lowercase();
     let mut search_from = 0;
@@ -358,7 +562,8 @@ fn gen_sitemap(site_dir: &Path, domain: &str, html: &str) -> Result<(), String> 
             break;
         }
     }
-    // 去重
+    // 加入发现的页面
+    urls.extend(discovered.iter().cloned());
     urls.sort();
     urls.dedup();
     let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
@@ -378,4 +583,91 @@ fn now_rfc3339() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("{}", secs)
+}
+
+#[cfg(test)]
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_doc(i: usize) -> DocMeta {
+        DocMeta {
+            domain: format!("s{}.com", i),
+            title: format!("测试站点 {}", i),
+            description: "描述内容".into(),
+            keywords: vec![],
+            url: format!("https://s{}.com/", i),
+        }
+    }
+
+    /// 文档分片 roundtrip:600 文档 -> 3 片文件 -> 加载回 600,旧 docs.json 移除
+    #[test]
+    fn docs_chunk_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("pilseo_idx_test_{}", now_secs()));
+        fs::create_dir_all(&dir).unwrap();
+        let docs: Vec<DocMeta> = (0..600).map(test_doc).collect();
+        let idx = SiteIndex {
+            docs,
+            blocks: Mutex::new(HashMap::new()),
+            data_dir: dir.clone(),
+            tokenizer: BpeTokenizer::train(&[], 300),
+        };
+        idx.save().unwrap();
+        let chunk_files = fs::read_dir(&dir)
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("docs_"))
+            .count();
+        assert_eq!(chunk_files, 3, "600 文档应分 3 片(256/片)");
+        assert!(!dir.join("docs.json").exists(), "旧式单文件应被移除");
+        // 每片应小于 256 条 JSON
+        let loaded = SiteIndex::load(&dir).unwrap();
+        assert_eq!(loaded.docs.len(), 600);
+        assert_eq!(loaded.docs[599].domain, "s599.com");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 旧式单文件 docs.json 兼容加载
+    #[test]
+    fn legacy_docs_json_compat() {
+        let dir = std::env::temp_dir().join(format!("pilseo_idx_legacy_{}", now_secs()));
+        fs::create_dir_all(&dir).unwrap();
+        let arr = Json::arr(vec![
+            Json::build(vec![
+                ("domain", Json::str("a.com")),
+                ("title", Json::str("A 站")),
+                ("description", Json::str("描述")),
+                ("keywords", Json::arr(vec![])),
+                ("url", Json::str("https://a.com/")),
+            ]),
+            Json::build(vec![
+                ("domain", Json::str("b.com")),
+                ("title", Json::str("B 站")),
+                ("description", Json::str("描述2")),
+                ("keywords", Json::arr(vec![Json::str("b")])),
+                ("url", Json::str("https://b.com/")),
+            ]),
+        ]);
+        fs::write(dir.join("docs.json"), arr.to_string()).unwrap();
+        let loaded = SiteIndex::load(&dir).unwrap();
+        assert_eq!(loaded.docs.len(), 2);
+        assert_eq!(loaded.docs[1].keywords, vec!["b".to_string()]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 折叠键:站群模板标题去掉域名后缀
+    #[test]
+    fn fold_key_strips_domain() {
+        assert_eq!(crate::search::fold_key("智能家居 - k.eu", "k.eu"), "智能家居");
+        assert_eq!(crate::search::fold_key("智能家居 - k.eu", "k.eu").len(), "智能家居".len());
+        assert_eq!(crate::search::fold_key("宠物 - a.com", "a.com"), "宠物");
+        // 不同标题不折叠
+        assert_ne!(crate::search::fold_key("智能家居 - k.eu", "k.eu"), crate::search::fold_key("人工智能 - k.eu", "k.eu"));
+    }
 }

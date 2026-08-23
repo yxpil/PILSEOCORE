@@ -152,7 +152,7 @@ fn call_tool(engine: &SearchEngine, name: &str, args: &Json) -> Json {
         "search" => {
             let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-            let (total, hits) = engine.search(q, limit);
+            let (total, hits) = engine.search(q, 1, limit);
             let arr: Vec<Json> = hits
                 .iter()
                 .map(|h| {
@@ -162,6 +162,7 @@ fn call_tool(engine: &SearchEngine, name: &str, args: &Json) -> Json {
                         ("domain", Json::str(&h.domain)),
                         ("description", Json::str(&h.description)),
                         ("score", Json::num(h.score)),
+                        ("fold_count", Json::num(h.fold_count as f64)),
                     ])
                 })
                 .collect();
@@ -200,8 +201,8 @@ fn call_tool(engine: &SearchEngine, name: &str, args: &Json) -> Json {
             Json::build(vec![("domain", Json::str(domain)), ("urls", Json::arr(urls))]).to_string()
         }
         "rebuild" => match engine.rebuild(
-            &std::path::Path::new("out/sites"),
-            &std::path::Path::new("data/index"),
+            &crate::config::sites_dir(),
+            &crate::config::index_dir(),
         ) {
             Ok(n) => Json::build(vec![("sites", Json::num(n as f64)), ("status", Json::str("ok"))]).to_string(),
             Err(e) => Json::build(vec![("status", Json::str("error")), ("message", Json::str(&e))]).to_string(),

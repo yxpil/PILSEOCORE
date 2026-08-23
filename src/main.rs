@@ -1,32 +1,19 @@
-﻿//! PILSEOCORE —— SEO 自动域名穷举引擎 + 本地搜索引擎
+﻿//! PILSEOCORE —— SEO 自动域名穷举引擎 + 本地搜索引擎(CLI 薄壳)
 //!
-//! 子命令:
+//! 全部核心能力在 pilseocore 库中;本二进制仅提供命令行入口:
 //!   (默认)             穷举模式:字符集穷举 x 后缀大全 x 多DNS并发解析 x 自动建站
 //!   serve [--port N]   启动本地搜索引擎(Web UI + API,自动加载/重建索引)
 //!   index              手动重建索引(扫描 out/sites 提取标题/meta,生成 sitemap.xml)
 //!   search <关键词>     CLI 搜索
 //!   mcp                启动 MCP Server(stdio,供 AI 客户端调用)
 
-mod ai;
-mod auth;
-mod config;
-mod dns;
-mod engine;
-mod enumerate;
-mod http;
-mod index;
-mod json;
-mod mcp;
-mod search;
-mod server;
-mod site;
+use pilseocore::{ai, auth, blacklist, config, dns, engine, http, index, mcp, search, server, tokenizer};
 
 use std::process::exit;
 use std::sync::Arc;
 use std::time::Instant;
 
-const SITES_DIR: &str = "out/sites";
-const INDEX_DIR: &str = "data/index";
+// 默认目录常量(可用环境变量 PILSEO_SITES_DIR / PILSEO_INDEX_DIR 覆盖,见 config::sites_dir/index_dir)
 
 fn usage() {
     println!(
@@ -74,6 +61,7 @@ fn real_main() -> Result<(), String> {
                 return cmd_search(&q);
             }
             "mcp" => return cmd_mcp(&args[1..]),
+            "tokenizer-train" => return cmd_tokenizer_train(),
             _ => {}
         }
     }
@@ -199,22 +187,23 @@ fn check_one(cfg: &config::Config, fqdn: &str) -> Result<(), String> {
 
 // ---------------- 本地搜索引擎 ----------------
 
-/// 加载或构建索引
+/// 加载或构建索引(含黑名单初始化;目录支持环境变量 PILSEO_SITES_DIR / PILSEO_INDEX_DIR)
 fn load_or_build_index(cfg: &config::Config, rebuild: bool) -> Result<Arc<search::SearchEngine>, String> {
-    let sites_dir = std::path::Path::new(SITES_DIR);
-    let index_dir = std::path::Path::new(INDEX_DIR);
+    let sites_dir = config::sites_dir();
+    let index_dir = config::index_dir();
+    let blacklist = Arc::new(blacklist::Blacklist::load(&index_dir));
     let meta_path = index_dir.join("meta.json");
     let need_build = rebuild || !meta_path.exists();
     let idx = if need_build {
         println!("[index] 扫描 {} 并重建索引...", sites_dir.display());
-        index::SiteIndex::build(sites_dir, index_dir)?
+        index::SiteIndex::build(&sites_dir, &index_dir, &blacklist)?
     } else {
         println!("[index] 加载已有索引 {}", index_dir.display());
-        index::SiteIndex::load(index_dir)?
+        index::SiteIndex::load(&index_dir)?
     };
     let (sites, terms, blocks) = idx.stats();
-    println!("[index] 站点={} 词={} 分块={}", sites, terms, blocks);
-    Ok(Arc::new(search::SearchEngine::new(idx, cfg.hot_cache_size, cfg.hot_cache_ttl)))
+    println!("[index] 站点={} 词={} 分块={} 黑名单={}", sites, terms, blocks, blacklist.blocked_count());
+    Ok(Arc::new(search::SearchEngine::new(idx, cfg.hot_cache_size, cfg.hot_cache_ttl, blacklist)))
 }
 
 fn cmd_serve(args: &[String]) -> Result<(), String> {
@@ -258,8 +247,8 @@ fn cmd_serve(args: &[String]) -> Result<(), String> {
         println!("[admin] 管理账号: {} (登录 Web UI 管理面板签发 API/MCP token)", cfg.admin_user);
     }
 
-    let tokens = crate::auth::TokenStore::load(std::path::Path::new("data"));
-    let sessions = crate::auth::Sessions::new(12 * 3600); // 会话 12 小时
+    let tokens = auth::TokenStore::load(std::path::Path::new("data"));
+    let sessions = auth::Sessions::new(12 * 3600); // 会话 12 小时
     let ctx = Arc::new(server::ServerCtx::new(
         engine,
         ai_cfg,
@@ -276,13 +265,28 @@ fn cmd_serve(args: &[String]) -> Result<(), String> {
 }
 
 fn cmd_index() -> Result<(), String> {
-    let sites_dir = std::path::Path::new(SITES_DIR);
-    let index_dir = std::path::Path::new(INDEX_DIR);
+    let sites_dir = config::sites_dir();
+    let index_dir = config::index_dir();
+    let blacklist = blacklist::Blacklist::load(&index_dir);
     let start = Instant::now();
-    let idx = index::SiteIndex::build(sites_dir, index_dir)?;
+    let idx = index::SiteIndex::build(&sites_dir, &index_dir, &blacklist)?;
     let (sites, terms, blocks) = idx.stats();
-    println!("[index] 完成: 站点={} 词={} 分块={} 耗时={:.2}s", sites, terms, blocks, start.elapsed().as_secs_f64());
+    println!("[index] 完成: 站点={} 词={} 分块={} 黑名单={} 耗时={:.2}s", sites, terms, blocks, blacklist.blocked_count(), start.elapsed().as_secs_f64());
     println!("[index] 已生成各站点 sitemap.xml,索引位于 {}", index_dir.display());
+    Ok(())
+}
+
+/// 从站点语料训练 BPE 分词器(81920 词表),保存到 data/index/tokenizer/vocab.json
+fn cmd_tokenizer_train() -> Result<(), String> {
+    let sites_dir = config::sites_dir();
+    let data_dir = config::index_dir();
+    let corpus = index::collect_corpus(&sites_dir);
+    println!("[tokenizer] 语料样本 {} 条,训练 {} 词表...", corpus.len(), tokenizer::VOCAB_SIZE);
+    let start = Instant::now();
+    let tok = tokenizer::BpeTokenizer::train(&corpus, tokenizer::VOCAB_SIZE);
+    let vocab_path = data_dir.join("tokenizer").join("vocab.json");
+    tok.save(&vocab_path)?;
+    println!("[tokenizer] 完成: {} tokens,耗时 {:.1}s,已保存 {}", tok.vocab_size(), start.elapsed().as_secs_f64(), vocab_path.display());
     Ok(())
 }
 
@@ -293,11 +297,12 @@ fn cmd_search(q: &str) -> Result<(), String> {
         return Err("用法: pilseocore search \"关键词\"".into());
     }
     let start = Instant::now();
-    let (total, hits) = engine.search(q, 10);
+    let (total, hits) = engine.search(q, 1, 10);
     let ms = start.elapsed().as_millis();
     println!("查询: {}  找到 {} 条 ({}ms)", q, total, ms);
     for (i, h) in hits.iter().enumerate() {
-        println!("{}. {} [{}]", i + 1, h.title, h.url);
+        let fold = if h.fold_count > 1 { format!(" (另有 {} 个相同标题)", h.fold_count - 1) } else { String::new() };
+        println!("{}. {} [{}]{}", i + 1, h.title, h.url, fold);
         if !h.description.is_empty() {
             println!("   {}", h.description);
         }
@@ -325,7 +330,7 @@ fn cmd_mcp(args: &[String]) -> Result<(), String> {
     }
     let cfg = config::load_config(&std::path::Path::new("config/engine.conf"))?;
     let engine = load_or_build_index(&cfg, false)?;
-    let tokens = crate::auth::TokenStore::load(std::path::Path::new("data"));
+    let tokens = auth::TokenStore::load(std::path::Path::new("data"));
     let token = token.or_else(|| std::env::var("PILSEO_TOKEN").ok());
     let Some(token) = token else {
         return Err(

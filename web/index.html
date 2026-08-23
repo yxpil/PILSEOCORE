@@ -51,6 +51,12 @@
   .ai-box .ai-err { color:var(--red); font-size:13px; margin-top:6px; }
 
   .empty { color:var(--gray); text-align:center; margin-top:80px; font-size:15px; }
+  .pager { display:flex; align-items:center; gap:6px; justify-content:center; margin:30px 0 10px; }
+  .pg { display:inline-block; min-width:40px; padding:10px 14px; border-radius:10px; font-size:14px; color:var(--blue); cursor:pointer; text-align:center; border:1px solid transparent; user-select:none; }
+  .pg:hover { background:#f1f3f4; }
+  .pg.cur { background:var(--blue); color:#fff; font-weight:600; box-shadow:0 1px 3px rgba(0,0,0,.15); }
+  .pg.dim { color:#dadce0; cursor:default; }
+  .pg.next { border:1px solid var(--line); }
 
   /* 模态框 */
   .modal-mask { display:none; position:fixed; inset:0; background:rgba(32,33,36,.5); z-index:100; }
@@ -148,17 +154,22 @@
       <button class="btn secondary" onclick="saveConfig('dns')">保存 DNS 列表</button>
 
       <label>API / MCP 访问令牌(管理员签发,用于 API 请求与 MCP 启动)</label>
-      <div id="tokenArea" style="margin-top:6px">
-        <div class="row">
-          <div><input type="text" id="tokenName" placeholder="用途名称,如 mcp-server"></div>
-          <div style="flex:0 0 auto"><button class="btn secondary" onclick="createToken()">签发 token</button></div>
-        </div>
-        <div id="tokenList" style="margin-top:8px"></div>
-        <div id="newTokenBox" style="display:none; margin-top:10px; background:#f8f9fa; border:1px solid var(--line); border-radius:8px; padding:12px 14px;">
-          <div style="font-size:12px; color:var(--gray); margin-bottom:6px">新 token(仅显示一次,请立即复制保存)</div>
-          <code id="newTokenValue" style="word-break:break-all; font-size:13px; color:#c5221f; user-select:all"></code>
-        </div>
+      <div class="row">
+        <input type="text" id="tokName" placeholder="令牌名称,如 mcp-server">
+        <button class="btn secondary" onclick="issueToken()">签发</button>
       </div>
+      <div id="tokList"></div>
+      <div id="newTokenBox" style="display:none; margin-top:10px; background:#f8f9fa; border:1px solid var(--line); border-radius:8px; padding:12px 14px;">
+        <div style="font-size:12px; color:var(--gray); margin-bottom:6px">新 token(仅显示一次,请立即复制保存)</div>
+        <code id="newTokenValue" style="word-break:break-all; font-size:13px; color:#c5221f; user-select:all"></code>
+      </div>
+
+      <label>黑名单(重复/雷同内容自动拉黑 + 手动管理)</label>
+      <div class="row">
+        <input type="text" id="blDomain" placeholder="域名,如 bad.com">
+        <button class="btn secondary" onclick="addBlacklist()">拉黑</button>
+      </div>
+      <div id="blList" style="font-size:12px;color:var(--gray)"></div>
       <div class="msg" id="adminMsg"></div>
     </div>
   </div>
@@ -182,9 +193,10 @@ function goHome() {
   history.pushState({}, '', '/');
 }
 
-function doSearch(q, useAi) {
+function doSearch(q, useAi, page) {
   if (!q || !q.trim()) return;
-  var url = '/api/search?q=' + encodeURIComponent(q.trim()) + '&limit=10';
+  page = page || 1;
+  var url = '/api/search?q=' + encodeURIComponent(q.trim()) + '&limit=10&page=' + page;
   if (useAi) url += '&ai=1';
   home.style.display = 'none';
   topbar.style.display = 'flex';
@@ -192,7 +204,7 @@ function doSearch(q, useAi) {
   hidePanel();
   fetch(url).then(function(r){ return r.json(); }).then(function(d){
     render(d, q);
-    history.pushState({}, '', '/search?q=' + encodeURIComponent(q));
+    history.pushState({}, '', '/search?q=' + encodeURIComponent(q) + '&page=' + page);
   }).catch(function(e){
     resultsBox.innerHTML = '<div class="empty">请求失败:' + e + '</div>';
     resultsBox.style.display = 'block';
@@ -202,7 +214,10 @@ function doSearch(q, useAi) {
 
 function render(d, q) {
   var html = '';
-  html += '<div class="stat">' + (d.ai_summary ? 'AI 摘要已生成 · ' : '') + '找到 ' + d.total + ' 条结果 (' + d.time_ms + ' 毫秒)</div>';
+  var gt = d.total || 0;
+  var pages = Math.max(1, d.pages || 1);
+  var cur = d.page || 1;
+  html += '<div class="stat">' + (d.ai_summary ? 'AI 摘要已生成 · ' : '') + '找到 ' + gt + ' 组结果 (' + d.time_ms + ' 毫秒)</div>';
   if (d.ai_summary) {
     html += '<div class="ai-box"><div class="ai-label">AI 智能摘要</div><div class="ai-text">' + esc(d.ai_summary) + '</div></div>';
   }
@@ -217,8 +232,22 @@ function render(d, q) {
     html += '<div class="url">' + esc(r.url) + '</div>';
     html += '<a class="title" href="' + esc(r.url) + '" target="_blank">' + esc(r.title) + '</a>';
     html += '<div class="desc">' + esc(r.description || '') + '</div>';
+    if (r.fold_count > 1) html += '<div class="kw">另有 ' + (r.fold_count - 1) + ' 个相同标题站点</div>';
     html += '</div>';
   });
+  // 分页导航
+  if (pages > 1) {
+    html += '<div class="pager">';
+    if (cur > 1) html += '<a class="pg" onclick="doSearch(\'' + esc(q).replace(/'/g, "\\'") + '\',false,' + (cur - 1) + ')">上一页</a>';
+    var start = Math.max(1, cur - 3), end = Math.min(pages, cur + 3);
+    if (start > 1) html += '<span class="pg dim">...</span>';
+    for (var i = start; i <= end; i++) {
+      html += (i === cur) ? '<span class="pg cur">' + i + '</span>' : '<a class="pg" onclick="doSearch(\'' + esc(q).replace(/'/g, "\\'") + '\',false,' + i + ')">' + i + '</a>';
+    }
+    if (end < pages) html += '<span class="pg dim">...</span>';
+    if (cur < pages) html += '<a class="pg" onclick="doSearch(\'' + esc(q).replace(/'/g, "\\'") + '\',false,' + (cur + 1) + ')">下一页</a>';
+    html += '</div>';
+  }
   resultsBox.innerHTML = html;
   resultsBox.style.display = 'block';
   foot.style.display = 'block';
@@ -306,6 +335,7 @@ function enterPanel() {
   setMsg('adminMsg', '管理员已验证', 'ok');
   loadConfigs();
   loadTokens();
+  loadBlacklist();
   pollScan();
   scanPoll = setInterval(pollScan, 3000);
 }
@@ -344,7 +374,7 @@ function saveConfig(kind) {
 function loadTokens() {
   adminFetch('/api/admin/tokens').then(function(r){ return r.json(); }).then(function(d){
     var list = d.tokens || [];
-    var el = document.getElementById('tokenList');
+    var el = document.getElementById('tokList');
     if (!list.length) { el.innerHTML = '<div style="font-size:12px; color:var(--gray)">尚未签发 token</div>'; return; }
     el.innerHTML = list.map(function(t){
       return '<div style="display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--line); font-size:13px">' +
@@ -356,8 +386,8 @@ function loadTokens() {
   }).catch(function(){});
 }
 
-function createToken() {
-  var name = document.getElementById('tokenName').value.trim();
+function issueToken() {
+  var name = document.getElementById('tokName').value.trim();
   if (!name) { setMsg('adminMsg', '请填写 token 用途名称', 'err'); return; }
   adminFetch('/api/admin/tokens', {
     method: 'POST',
@@ -368,7 +398,7 @@ function createToken() {
       document.getElementById('newTokenBox').style.display = 'block';
       document.getElementById('newTokenValue').textContent = res.d.token;
       setMsg('adminMsg', 'token 已签发: ' + res.d.name, 'ok');
-      document.getElementById('tokenName').value = '';
+      document.getElementById('tokName').value = '';
       loadTokens();
     } else {
       setMsg('adminMsg', '签发失败: ' + (res.d.error || res.status), 'err');
@@ -381,6 +411,43 @@ function revokeToken(id) {
   adminFetch('/api/admin/tokens/' + id, { method: 'DELETE' }).then(function(r){
     if (r.status === 200) { setMsg('adminMsg', 'token 已撤销', 'ok'); loadTokens(); }
     else setMsg('adminMsg', '撤销失败', 'err');
+  });
+}
+
+/* ---- 黑名单管理 ---- */
+function loadBlacklist() {
+  adminFetch('/api/admin/blacklist').then(function(r){ return r.json(); }).then(function(d){
+    var list = d.blacklist || [];
+    var el = document.getElementById('blList');
+    if (!list.length) { el.innerHTML = '黑名单为空(内容雷同/重复的域名会自动拉黑)'; return; }
+    el.innerHTML = list.map(function(b){
+      var reason = b.reason === 'similar' ? '内容雷同' : (b.reason === 'duplicate' ? '内容重复' : '手动拉黑');
+      return '<div style="display:flex; align-items:center; gap:10px; padding:5px 0; border-bottom:1px solid var(--line)">' +
+        '<b style="flex:1">' + esc(b.domain) + '</b>' +
+        '<span style="color:var(--gray)">' + reason + '</span>' +
+        '<a style="color:var(--blue); cursor:pointer" onclick="removeBlacklist(\'' + esc(b.domain) + '\')">解除</a></div>';
+    }).join('');
+  }).catch(function(){});
+}
+
+function addBlacklist() {
+  var domain = document.getElementById('blDomain').value.trim();
+  if (!domain) { setMsg('adminMsg', '请填写要拉黑的域名', 'err'); return; }
+  adminFetch('/api/admin/blacklist', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ domain: domain })
+  }).then(function(r){
+    if (r.status === 200) { setMsg('adminMsg', '已拉黑 ' + domain, 'ok'); document.getElementById('blDomain').value = ''; loadBlacklist(); }
+    else setMsg('adminMsg', '拉黑失败', 'err');
+  });
+}
+
+function removeBlacklist(domain) {
+  if (!confirm('解除拉黑 ' + domain + '?')) return;
+  adminFetch('/api/admin/blacklist/' + encodeURIComponent(domain), { method: 'DELETE' }).then(function(r){
+    if (r.status === 200) { setMsg('adminMsg', '已解除 ' + domain, 'ok'); loadBlacklist(); }
+    else setMsg('adminMsg', '解除失败', 'err');
   });
 }
 
@@ -444,8 +511,10 @@ function rebuildIndex() {
 (function(){
   var p = location.pathname;
   if (p === '/search') {
-    var q = new URLSearchParams(location.search).get('q');
-    if (q) doSearch(q);
+    var params = new URLSearchParams(location.search);
+    var q = params.get('q');
+    var pg = parseInt(params.get('page'), 10) || 1;
+    if (q) doSearch(q, false, pg);
     else goHome();
   }
 })();

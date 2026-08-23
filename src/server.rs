@@ -156,6 +156,14 @@ pub fn handle(ctx: &ServerCtx, req: &Request) -> Response {
             let id = &p["/api/admin/tokens/".len()..];
             admin_guard(ctx, req, |ctx| admin_tokens_revoke(ctx, id))
         }
+        // ---- 黑名单管理 ----
+        ("GET", "/api/admin/blacklist") => admin_guard(ctx, req, |ctx| admin_blacklist_list(ctx)),
+        ("POST", "/api/admin/blacklist") => admin_guard(ctx, req, |ctx| admin_blacklist_add(ctx, req)),
+        ("DELETE", "/api/admin/blacklist/") => Response::json(400, r#"{"error":"缺少域名"}"#),
+        ("DELETE", p) if p.starts_with("/api/admin/blacklist/") => {
+            let domain = &p["/api/admin/blacklist/".len()..];
+            admin_guard(ctx, req, |ctx| admin_blacklist_remove(ctx, domain))
+        }
         _ => Response::not_found(),
     }
 }
@@ -224,14 +232,16 @@ fn api_stats(ctx: &ServerCtx) -> Response {
 
 fn api_search(ctx: &ServerCtx, req: &Request) -> Response {
     let q = req.param("q").unwrap_or("").trim().to_string();
-    let limit = req.param("limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(10).min(100);
+    let page = req.param("page").and_then(|s| s.parse::<usize>().ok()).unwrap_or(1).max(1);
+    let limit = req.param("limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(10).min(100).max(1);
     let want_ai = req.param("ai").map(|v| v == "1" || v == "true").unwrap_or(false);
     if q.is_empty() {
         return Response::json(400, r#"{"error":"缺少参数 q"}"#);
     }
     let start = Instant::now();
-    let (total, hits) = ctx.engine.search(&q, limit);
+    let (total, hits) = ctx.engine.search(&q, page, limit);
     let elapsed_ms = start.elapsed().as_millis();
+    let pages = (total + limit - 1) / limit;
 
     let results: Vec<Json> = hits
         .iter()
@@ -242,12 +252,15 @@ fn api_search(ctx: &ServerCtx, req: &Request) -> Response {
                 ("domain", Json::str(&h.domain)),
                 ("description", Json::str(&h.description)),
                 ("score", Json::num(h.score)),
+                ("fold_count", Json::num(h.fold_count as f64)),
             ])
         })
         .collect();
 
     let mut pairs: Vec<(&str, Json)> = vec![
         ("query", Json::str(&q)),
+        ("page", Json::num(page as f64)),
+        ("pages", Json::num(pages as f64)),
         ("time_ms", Json::num(elapsed_ms as f64)),
         ("total", Json::num(total as f64)),
         ("results", Json::arr(results)),
@@ -291,7 +304,7 @@ fn api_sitemap(ctx: &ServerCtx, req: &Request) -> Response {
     if domain.is_empty() {
         return Response::json(400, r#"{"error":"缺少参数 domain"}"#);
     }
-    let site_dir = Path::new("out/sites").join(&domain);
+    let site_dir = crate::config::sites_dir().join(&domain);
     let sitemap_path = site_dir.join("sitemap.xml");
     let mut urls = vec![format!("https://{}/", domain)];
     if let Ok(xml) = std::fs::read_to_string(&sitemap_path) {
@@ -387,6 +400,47 @@ fn admin_tokens_revoke(ctx: &ServerCtx, id: &str) -> Response {
         Response::json(200, &Json::build(vec![("status", Json::str("ok")), ("revoked", Json::str(id))]).to_string())
     } else {
         Response::json(404, r#"{"error":"token 不存在"}"#)
+    }
+}
+
+// ---------------- 黑名单管理 ----------------
+
+fn admin_blacklist_list(ctx: &ServerCtx) -> Response {
+    let entries: Vec<Json> = ctx
+        .engine
+        .blacklist
+        .list()
+        .iter()
+        .map(|e| {
+            Json::build(vec![
+                ("domain", Json::str(&e.domain)),
+                ("reason", Json::str(&e.reason)),
+                ("added_at", Json::num(e.added_at as f64)),
+            ])
+        })
+        .collect();
+    let n = entries.len();
+    Response::json(200, &Json::build(vec![("count", Json::num(n as f64)), ("blacklist", Json::arr(entries))]).to_string())
+}
+
+fn admin_blacklist_add(ctx: &ServerCtx, req: &Request) -> Response {
+    let body = String::from_utf8_lossy(&req.body);
+    let params = crate::json::parse(&body).unwrap_or(Json::obj());
+    let domain = params.get("domain").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    if domain.is_empty() {
+        return Response::json(400, r#"{"error":"缺少参数 domain"}"#);
+    }
+    ctx.engine.blacklist.add(&domain, "manual");
+    ctx.engine.clear_cache(); // 黑名单变更,清缓存立即生效
+    Response::json(200, &Json::build(vec![("status", Json::str("ok")), ("domain", Json::str(&domain))]).to_string())
+}
+
+fn admin_blacklist_remove(ctx: &ServerCtx, domain: &str) -> Response {
+    if ctx.engine.blacklist.remove(domain) {
+        ctx.engine.clear_cache(); // 黑名单变更,清缓存立即生效
+        Response::json(200, &Json::build(vec![("status", Json::str("ok")), ("removed", Json::str(domain))]).to_string())
+    } else {
+        Response::json(404, r#"{"error":"域名不在黑名单"}"#)
     }
 }
 
@@ -491,7 +545,7 @@ fn admin_scan(ctx: &ServerCtx, req: &Request) -> Response {
             Err(e) => s.error = Some(e),
         }
         // 扫描完成后自动重建索引,让新站点立即可搜
-        let _ = engine.rebuild(Path::new("out/sites"), Path::new("data/index"));
+        let _ = engine.rebuild(&crate::config::sites_dir(), &crate::config::index_dir());
     });
 
     Response::json(202, &Json::build(vec![("status", Json::str("scan_started")), ("max_len", Json::num(max_len as f64))]).to_string())
@@ -588,7 +642,7 @@ fn admin_config_save(_ctx: &ServerCtx, req: &Request, kind: &str) -> Response {
 }
 
 fn admin_rebuild(ctx: &ServerCtx) -> Response {
-    match ctx.engine.rebuild(Path::new("out/sites"), Path::new("data/index")) {
+    match ctx.engine.rebuild(&crate::config::sites_dir(), &crate::config::index_dir()) {
         Ok(n) => Response::json(200, &Json::build(vec![("status", Json::str("ok")), ("sites", Json::num(n as f64))]).to_string()),
         Err(e) => Response::json(500, &Json::build(vec![("status", Json::str("error")), ("message", Json::str(&e))]).to_string()),
     }

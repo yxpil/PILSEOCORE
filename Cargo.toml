@@ -2,11 +2,19 @@
 name = "pilseocore"
 version = "0.1.0"
 edition = "2021"
-description = "SEO 自动域名穷举引擎:字符集穷举 x 后缀大全 x 多DNS并发解析 x 自动建站"
+description = "SEO 自动域名穷举引擎 + 本地搜索引擎内核(零第三方依赖)"
 license = "MIT"
 
 # 零第三方依赖:纯标准库实现(DNS 报文手写构造/解析,线程池并发)
 [dependencies]
+
+[lib]
+name = "pilseocore"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pilseocore"
+path = "src/main.rs"
 
 [profile.release]
 opt-level = 3
