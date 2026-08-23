@@ -35,9 +35,9 @@ pub struct Crawler {
     /// domain -> robots Disallow 前缀列表
     robots: Arc<Mutex<HashMap<String, Vec<String>>>>,
     /// 内存 favicon 缓存:domain -> ico 字节(不落盘)
-    favicons: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    pub favicons: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     /// LRU 顺序(用于淘汰 favicon 缓存)
-    favicon_order: Arc<Mutex<VecDeque<String>>>,
+    pub favicon_order: Arc<Mutex<VecDeque<String>>>,
     pub stats: Arc<Mutex<CrawlStats>>,
     max_depth: usize,
     max_pages: usize,
@@ -48,14 +48,34 @@ pub struct Crawler {
 
 impl Crawler {
     pub fn new(max_depth: usize, max_pages: usize, per_domain: usize, timeout_ms: u64, workers: usize) -> Crawler {
+        Crawler::new_shared(max_depth, max_pages, per_domain, timeout_ms, workers, None)
+    }
+
+    /// 创建爬虫并共享 stats/favicons(管理面板触发时实时显示进度)
+    pub fn new_shared(
+        max_depth: usize,
+        max_pages: usize,
+        per_domain: usize,
+        timeout_ms: u64,
+        workers: usize,
+        shared: Option<(Arc<Mutex<CrawlStats>>, Arc<Mutex<HashMap<String, Vec<u8>>>>, Arc<Mutex<VecDeque<String>>>)>,
+    ) -> Crawler {
         // CPU 自适应:默认 worker 数 = 核数(可配置覆盖)
         let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let (stats, favicons, favicon_order) = match shared {
+            Some((s, f, o)) => (s, f, o),
+            None => (
+                Arc::new(Mutex::new(CrawlStats::default())),
+                Arc::new(Mutex::new(HashMap::new())),
+                Arc::new(Mutex::new(VecDeque::new())),
+            ),
+        };
         Crawler {
             visited: Arc::new(Mutex::new(HashSet::new())),
             robots: Arc::new(Mutex::new(HashMap::new())),
-            favicons: Arc::new(Mutex::new(HashMap::new())),
-            favicon_order: Arc::new(Mutex::new(VecDeque::new())),
-            stats: Arc::new(Mutex::new(CrawlStats::default())),
+            favicons,
+            favicon_order,
+            stats,
             max_depth: max_depth.max(1),
             max_pages: max_pages.max(1).min(200_000),
             per_domain: per_domain.max(1),

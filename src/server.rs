@@ -618,17 +618,14 @@ fn admin_crawl(ctx: &ServerCtx, req: &Request) -> Response {
     let out_dir = crawl_out_dir();
     std::thread::spawn(move || {
         crawler.set_workers(workers);
-        let c = crate::crawler::Crawler::new(depth, max_pages, per_domain, timeout, crawler.worker_count());
+        // 共享 stats/favicons:管理面板实时看到进度,favicon 缓存不重复抓
+        let c = crate::crawler::Crawler::new_shared(
+            depth, max_pages, per_domain, timeout,
+            crawler.worker_count(),
+            Some((crawler.stats.clone(), crawler.favicons.clone(), crawler.favicon_order.clone())),
+        );
         *crawler.stats.lock().unwrap() = crate::crawler::CrawlStats::default();
         let stats = c.crawl(&seeds, &out_dir);
-        {
-            let mut st = crawler.stats.lock().unwrap();
-            st.fetched = stats.fetched;
-            st.discovered = stats.discovered;
-            st.failed = stats.failed;
-            st.skipped_robots = stats.skipped_robots;
-            st.elapsed_secs = stats.elapsed_secs;
-        }
         println!("[crawler] 完成: 抓取 {} 发现 {} 失败 {} ({:.0}s, workers={})", stats.fetched, stats.discovered, stats.failed, stats.elapsed_secs, c.worker_count());
         // 爬完重建索引收录新站
         let _ = engine.rebuild(&crate::config::sites_dir(), &crate::config::index_dir());
