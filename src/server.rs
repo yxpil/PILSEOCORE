@@ -127,10 +127,14 @@ impl ServerCtx {
     }
 }
 
+/// 管理后台(独立页面,左右布局)
+const ADMIN_UI: &str = include_str!("../web/admin.html");
+
 pub fn handle(ctx: &ServerCtx, req: &Request) -> Response {
     let path = req.path.as_str();
     match (req.method.as_str(), path) {
         ("GET", "/") => Response::html(200, WEB_UI),
+        ("GET", "/admin") => Response::html(200, ADMIN_UI),
         ("GET", "/api/docs") => Response::html(200, API_DOCS),
         ("GET", "/api/status") => api_status(ctx),
         ("GET", "/api/stats") => api_stats(ctx),
@@ -201,6 +205,7 @@ fn api_status(ctx: &ServerCtx) -> Response {
         ("cache_misses", Json::num(misses as f64)),
         ("cache_hit_rate", Json::num(if hits + misses > 0 { hits as f64 / (hits + misses) as f64 } else { 0.0 })),
         ("admin_enabled", Json::Bool(ctx.admin_enabled())),
+        ("blacklist", Json::num(ctx.engine.blacklist.blocked_count() as f64)),
         ("scan_running", Json::Bool(ctx.scan.lock().unwrap().running)),
     ]);
     Response::json(200, &j.to_string())
@@ -253,6 +258,7 @@ fn api_search(ctx: &ServerCtx, req: &Request) -> Response {
                 ("description", Json::str(&h.description)),
                 ("score", Json::num(h.score)),
                 ("fold_count", Json::num(h.fold_count as f64)),
+                ("dup_count", Json::num(h.dup_count as f64)),
             ])
         })
         .collect();

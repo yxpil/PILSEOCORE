@@ -17,6 +17,8 @@ pub struct DocMeta {
     pub description: String,
     pub keywords: Vec<String>,
     pub url: String,
+    /// 内容重复计数:相同/雷同内容的站点数(仅保留一条,此字段记录总数)
+    pub dup_count: usize,
 }
 
 /// 分块倒排索引(按词首字符分块: 0-9 a-z _)+ BPE 分词器
@@ -71,7 +73,8 @@ impl SiteIndex {
     /// 全量重建索引:
     /// 1. 训练/加载 BPE 分词器(81920 词表)
     /// 2. 扫描站点,通过 sitemap + <a> 标签发现站内全部页面(不只 index.html)
-    /// 3. 内容指纹去重/雷同检测,重复劣质域名自动拉黑
+    /// 3. 内容指纹去重:**重复/雷同内容计数去重**(只保留一条,dup_count 记录总数,
+    ///    不拉黑、不删除结果;手动黑名单域名跳过)
     /// 4. 提取标题/meta,构建分块倒排索引,生成 sitemap.xml
     pub fn build(sites_dir: &Path, data_dir: &Path, blacklist: &Blacklist) -> Result<SiteIndex, String> {
         // ---- 1. 训练/加载分词器 ----
@@ -94,10 +97,13 @@ impl SiteIndex {
         };
         println!("[index] 分词器: {} tokens", tokenizer.vocab_size());
 
-        // ---- 2/3/4. 扫描站点建索引 ----
-        let mut docs = Vec::new();
+        // ---- 2/3/4. 扫描站点建索引(内容指纹计数去重) ----
+        let mut docs: Vec<DocMeta> = Vec::new();
         let mut blocks: HashMap<u8, HashMap<String, Vec<usize>>> = HashMap::new();
-        let mut blocked = 0usize;
+        let mut blocked = 0usize; // 手动黑名单跳过
+        let mut deduped = 0usize; // 计数去重数量
+        // 指纹库:fnv 精确重复索引 + simhash 雷同索引 (fnv -> (simhash, len, doc_id))
+        let mut fingerprints: HashMap<u64, (u64, usize, usize)> = HashMap::new();
 
         if sites_dir.exists() {
             let entries = fs::read_dir(sites_dir)
@@ -108,6 +114,11 @@ impl SiteIndex {
                     continue;
                 }
                 let domain = dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                // 手动黑名单域名:跳过(不索引不计数)
+                if blacklist.is_blocked(&domain) {
+                    blocked += 1;
+                    continue;
+                }
                 let html_path = dir.join("index.html");
                 if !html_path.exists() {
                     continue;
@@ -116,12 +127,35 @@ impl SiteIndex {
                     Ok(h) => h,
                     Err(_) => continue,
                 };
-                // 内容指纹:主页文本(去重/雷同检测)
-                let main_text = extract_page_text(&html);
-                if !blacklist.check_before_index(&domain, &main_text) {
-                    blocked += 1;
+                // 内容指纹:主页文本(去域名化)
+                let fp_text = crate::blacklist::fingerprint_text(&domain, &extract_page_text(&html));
+                let fh = crate::blacklist::fnv1a64(&fp_text);
+                let fp = crate::blacklist::simhash(&fp_text);
+                let fp_len = fp_text.len();
+                // 计数去重:精确重复(fnv 相同)或雷同(simhash 近 + 长度差 <=30%)
+                let mut dup_target: Option<usize> = None;
+                if let Some(&(_, _, doc_id)) = fingerprints.get(&fh) {
+                    dup_target = Some(doc_id);
+                } else if fp_len >= 128 {
+                    // 短文本(<128 字节)只做精确重复:SimHash 特征少,共享短语易误判
+                    for (_, (h, len, doc_id)) in fingerprints.iter() {
+                        let max_len = fp_len.max(*len).max(1);
+                        if fp_len.abs_diff(*len) * 10 > max_len * 3 {
+                            continue; // 长度差 > 30% 不算雷同
+                        }
+                        if crate::blacklist::hamming(fp, *h) <= 6 {
+                            dup_target = Some(*doc_id);
+                            break;
+                        }
+                    }
+                }
+                if let Some(doc_id) = dup_target {
+                    // 重复:计数到保留文档,本站不建文档
+                    docs[doc_id].dup_count += 1;
+                    deduped += 1;
                     continue;
                 }
+
                 // 发现站内全部页面(.html,含子目录)
                 let pages = discover_pages(&dir);
                 let mut page_urls: Vec<String> = Vec::new();
@@ -142,6 +176,7 @@ impl SiteIndex {
                         description,
                         keywords: keywords.clone(),
                         url,
+                        dup_count: 1,
                     });
                     // 分词入倒排
                     let mut text = String::new();
@@ -163,12 +198,17 @@ impl SiteIndex {
                         blocks.entry(chunk).or_default().entry(term).or_default().push(doc_id);
                     }
                 }
+                // 记录指纹(指向站点首页文档)
+                fingerprints.insert(fh, (fp, fp_len, docs.len() - pages.len()));
                 // 生成 sitemap.xml(主页 + <a> 发现 + 发现的页面)
                 let _ = gen_sitemap(&dir, &domain, &html, &page_urls);
             }
         }
+        if deduped > 0 {
+            println!("[index] 内容计数去重: {} 个站点与已有内容重复/雷同(计数合并)", deduped);
+        }
         if blocked > 0 {
-            println!("[index] 自动拉黑雷同/重复域名: {} 个", blocked);
+            println!("[index] 跳过手动黑名单域名: {} 个", blocked);
         }
 
         fs::create_dir_all(data_dir).map_err(|e| format!("创建索引目录失败: {}", e))?;
@@ -208,6 +248,7 @@ impl SiteIndex {
                 ("description", Json::str(&d.description)),
                 ("keywords", Json::arr(d.keywords.iter().map(|k| Json::str(k)).collect())),
                 ("url", Json::str(&d.url)),
+                ("dup_count", Json::num(d.dup_count as f64)),
             ]));
             if chunk.len() >= DOCS_PER_CHUNK {
                 write_docs_chunk(&self.data_dir, chunk_idx, &chunk)?;
@@ -333,6 +374,7 @@ fn parse_docs_file(path: &Path) -> Option<Vec<DocMeta>> {
     Some(
         arr.iter()
             .filter_map(|item| {
+                let dup = item.get("dup_count").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
                 Some(DocMeta {
                     domain: item.get("domain")?.as_str()?.to_string(),
                     title: item.get("title")?.as_str()?.to_string(),
@@ -344,6 +386,7 @@ fn parse_docs_file(path: &Path) -> Option<Vec<DocMeta>> {
                         .iter()
                         .filter_map(|k| k.as_str().map(|s| s.to_string()))
                         .collect(),
+                    dup_count: dup.max(1),
                 })
             })
             .collect(),
@@ -604,6 +647,7 @@ mod tests {
             description: "描述内容".into(),
             keywords: vec![],
             url: format!("https://s{}.com/", i),
+            dup_count: 1,
         }
     }
 

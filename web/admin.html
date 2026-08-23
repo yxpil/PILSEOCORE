@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PILSEOCORE 管理后台</title>
+<style>
+  :root {
+    --bg:#f7f8fa; --panel:#fff; --line:#e8eaed; --text:#202124;
+    --gray:#5f6368; --blue:#1a73e8; --red:#d93025; --green:#188038;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:"Segoe UI","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); }
+  .shell { display:flex; min-height:100vh; }
+
+  /* 左侧导航 */
+  .side { width:220px; background:#202124; color:#fff; display:flex; flex-direction:column; position:sticky; top:0; height:100vh; }
+  .logo { padding:20px 18px; font-size:16px; font-weight:700; letter-spacing:.5px; border-bottom:1px solid rgba(255,255,255,.08); }
+  .logo span { color:#9aa0a6; font-size:11px; font-weight:400; display:block; margin-top:2px; }
+  nav { flex:1; padding:12px 8px; display:flex; flex-direction:column; gap:2px; }
+  .nav-item { padding:10px 14px; border-radius:8px; color:#e8eaed; cursor:pointer; font-size:14px; transition:background .15s; user-select:none; }
+  .nav-item:hover { background:rgba(255,255,255,.06); }
+  .nav-item.active { background:var(--blue); color:#fff; font-weight:600; }
+  .side-foot { padding:14px 18px; border-top:1px solid rgba(255,255,255,.08); font-size:13px; }
+  .side-foot a { color:#8ab4f8; text-decoration:none; }
+
+  /* 右侧内容 */
+  .main { flex:1; padding:28px 36px; max-width:1100px; }
+  .view { display:none; }
+  .view.active { display:block; }
+  h2 { font-size:20px; margin-bottom:6px; }
+  .sub { color:var(--gray); font-size:13px; margin-bottom:20px; }
+
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin-bottom:16px; }
+  .card h3 { font-size:14px; margin-bottom:12px; }
+  label { display:block; font-size:13px; color:var(--gray); margin:10px 0 5px; }
+  input[type=text], input[type=password], input[type=number], textarea {
+    width:100%; padding:9px 12px; border:1px solid var(--line); border-radius:8px; font-size:14px;
+    background:#fff; color:var(--text); outline:none; font-family:inherit;
+  }
+  input:focus, textarea:focus { border-color:var(--blue); }
+  textarea { min-height:130px; font-family:Consolas,monospace; font-size:12.5px; resize:vertical; }
+  .row { display:flex; gap:10px; align-items:center; }
+  .row input { flex:1; }
+
+  .btn { background:var(--blue); color:#fff; border:none; border-radius:8px; padding:9px 18px; font-size:14px; cursor:pointer; }
+  .btn:hover { opacity:.9; }
+  .btn.sec { background:#fff; color:var(--blue); border:1px solid var(--blue); }
+  .btn.danger { background:#fff; color:var(--red); border:1px solid var(--red); }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .btn.sm { padding:5px 12px; font-size:12.5px; }
+
+  .msg { font-size:13px; margin-top:10px; min-height:18px; }
+  .msg.ok { color:var(--green); } .msg.err { color:var(--red); } .msg.warn { color:#b06000; }
+
+  .bar-wrap { background:#f1f3f4; border-radius:8px; height:8px; overflow:hidden; margin:10px 0 6px; }
+  .bar { background:var(--blue); height:100%; width:0; transition:width .3s; border-radius:8px; }
+  .state-line { font-size:13px; color:var(--gray); }
+
+  .kv { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:12px; }
+  .kv .cell { background:#f8f9fa; border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .kv .cell b { display:block; font-size:22px; margin-top:2px; }
+  .kv .cell span { font-size:12px; color:var(--gray); }
+
+  .list-item { display:flex; align-items:center; gap:12px; padding:9px 0; border-bottom:1px solid var(--line); font-size:13.5px; }
+  .list-item b { flex:1; font-weight:500; }
+  .list-item .tag { font-size:11.5px; color:var(--gray); background:#f1f3f4; padding:2px 8px; border-radius:10px; }
+  a.link { color:var(--blue); cursor:pointer; text-decoration:none; font-size:13px; }
+  a.link.red { color:var(--red); }
+
+  /* 登录 */
+  .login-wrap { display:flex; align-items:center; justify-content:center; min-height:100vh; }
+  .login-card { width:340px; background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:32px 30px; }
+  .login-card h2 { text-align:center; margin-bottom:4px; }
+  .login-card .sub { text-align:center; }
+  #panelBox { display:none; }
+</style>
+</head>
+<body>
+
+<div id="loginWrap" class="login-wrap">
+  <div class="login-card">
+    <h2>PILSEOCORE</h2>
+    <div class="sub">管理后台</div>
+    <label>管理员账号</label>
+    <input type="text" id="loginUser" placeholder="admin_user" onkeydown="if(event.key==='Enter')doLogin()">
+    <label>密码</label>
+    <input type="password" id="loginPass" placeholder="密码" onkeydown="if(event.key==='Enter')doLogin()">
+    <div style="margin-top:16px"><button class="btn" style="width:100%" onclick="doLogin()">登录</button></div>
+    <div class="msg" id="loginMsg"></div>
+  </div>
+</div>
+
+<div id="panelBox" class="shell">
+  <aside class="side">
+    <div class="logo">PILSEOCORE<span>管理后台</span></div>
+    <nav>
+      <div class="nav-item active" data-view="overview" onclick="switchView('overview')">概览</div>
+      <div class="nav-item" data-view="scan" onclick="switchView('scan')">穷举控制</div>
+      <div class="nav-item" data-view="config" onclick="switchView('config')">后缀与 DNS</div>
+      <div class="nav-item" data-view="tokens" onclick="switchView('tokens')">API Token</div>
+      <div class="nav-item" data-view="blacklist" onclick="switchView('blacklist')">黑名单</div>
+    </nav>
+    <div class="side-foot"><a href="/">返回搜索首页</a></div>
+  </aside>
+
+  <main class="main">
+    <div id="msg" class="msg"></div>
+
+    <!-- 概览 -->
+    <section id="view-overview" class="view active">
+      <h2>概览</h2>
+      <div class="sub">搜索引擎运行状态</div>
+      <div class="kv" id="overviewKv"></div>
+      <div class="card" style="margin-top:16px">
+        <h3>扫描状态</h3>
+        <div class="bar-wrap"><div class="bar" id="ovBar"></div></div>
+        <div class="state-line" id="ovScan"></div>
+      </div>
+    </section>
+
+    <!-- 穷举控制 -->
+    <section id="view-scan" class="view">
+      <h2>穷举控制</h2>
+      <div class="sub">SEO 域名穷举遍历:按字符集从 1 位到指定位数,遍历全部后缀</div>
+      <div class="card">
+        <div class="row">
+          <div style="flex:1"><label style="margin-top:0">最大位数(1-20)</label><input type="number" id="scanMaxLen" value="2" min="1" max="20"></div>
+          <div style="flex:1"><label style="margin-top:0">并发 worker</label><input type="number" id="scanWorkers" value="64" min="1" max="512"></div>
+        </div>
+        <div style="margin-top:14px; display:flex; gap:10px">
+          <button class="btn" id="scanBtn" onclick="startScan()">开始穷举遍历</button>
+          <button class="btn sec" onclick="rebuildIndex()">重建索引</button>
+        </div>
+        <div class="bar-wrap"><div class="bar" id="scanBar"></div></div>
+        <div class="state-line" id="scanText"></div>
+      </div>
+    </section>
+
+    <!-- 配置 -->
+    <section id="view-config" class="view">
+      <h2>后缀与 DNS</h2>
+      <div class="sub">域名后缀列表按顺序遍历;DNS 服务器随机负载均衡</div>
+      <div class="card">
+        <h3>域名后缀大全(空格分隔)</h3>
+        <textarea id="tldEdit"></textarea>
+        <button class="btn sec sm" style="margin-top:10px" onclick="saveConfig('tld')">保存后缀列表</button>
+      </div>
+      <div class="card">
+        <h3>DNS 服务器列表(每行一个)</h3>
+        <textarea id="dnsEdit"></textarea>
+        <button class="btn sec sm" style="margin-top:10px" onclick="saveConfig('dns')">保存 DNS 列表</button>
+      </div>
+    </section>
+
+    <!-- Token -->
+    <section id="view-tokens" class="view">
+      <h2>API Token</h2>
+      <div class="sub">管理员签发的访问令牌,供 API 请求与 MCP 启动使用</div>
+      <div class="card">
+        <div class="row">
+          <input type="text" id="tokName" placeholder="令牌名称,如 mcp-server">
+          <button class="btn sm" onclick="issueToken()">签发</button>
+        </div>
+        <div id="tokList" style="margin-top:12px"></div>
+        <div id="newTokenBox" style="display:none; margin-top:12px; background:#f8f9fa; border:1px solid var(--line); border-radius:8px; padding:12px 14px;">
+          <div style="font-size:12px; color:var(--gray); margin-bottom:6px">新 token(仅显示一次,请立即复制保存)</div>
+          <code id="newTokenValue" style="word-break:break-all; font-size:13px; color:var(--red); user-select:all"></code>
+        </div>
+      </div>
+    </section>
+
+    <!-- 黑名单 -->
+    <section id="view-blacklist" class="view">
+      <h2>黑名单</h2>
+      <div class="sub">手动拉黑域名,搜索实时过滤(内容重复由索引层计数去重,不在此列)</div>
+      <div class="card">
+        <div class="row">
+          <input type="text" id="blDomain" placeholder="域名,如 bad.com">
+          <button class="btn sm" onclick="addBlacklist()">拉黑</button>
+        </div>
+        <div id="blList" style="margin-top:12px; font-size:13px"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+var token = localStorage.getItem('pilseo_admin_session') || '';
+
+/* ============ 通用 ============ */
+function adminFetch(path, opts) {
+  opts = opts || {};
+  opts.headers = opts.headers || {};
+  if (token) opts.headers['Authorization'] = 'Bearer ' + token;
+  return fetch(path, opts);
+}
+function setMsg(el, text, type) {
+  var m = document.getElementById(el);
+  m.className = 'msg' + (type ? ' ' + type : '');
+  m.textContent = text || '';
+}
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+/* ============ 登录 ============ */
+function doLogin() {
+  var u = document.getElementById('loginUser').value.trim();
+  var p = document.getElementById('loginPass').value;
+  if (!u || !p) { setMsg('loginMsg', '请输入账号密码', 'err'); return; }
+  fetch('/api/auth/login', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({username:u, password:p})
+  }).then(function(r){ return r.json().then(function(d){ return {status:r.status, d:d}; }); }).then(function(res){
+    if (res.status === 200) {
+      token = res.d.token;
+      localStorage.setItem('pilseo_admin_session', token);
+      document.getElementById('loginWrap').style.display = 'none';
+      document.getElementById('panelBox').style.display = 'flex';
+      init();
+    } else {
+      setMsg('loginMsg', '登录失败: ' + (res.d.error || res.status), 'err');
+    }
+  }).catch(function(e){ setMsg('loginMsg', '请求失败: ' + e, 'err'); });
+}
+
+/* ============ 视图切换 ============ */
+function switchView(v) {
+  document.querySelectorAll('.nav-item').forEach(function(n){ n.classList.toggle('active', n.dataset.view === v); });
+  document.querySelectorAll('.view').forEach(function(s){ s.classList.toggle('active', s.id === 'view-' + v); });
+  if (v === 'config') loadConfigs();
+  if (v === 'tokens') loadTokens();
+  if (v === 'blacklist') loadBlacklist();
+  if (v === 'overview') { loadOverview(); pollScan(); }
+  if (v === 'scan') pollScan();
+}
+
+/* ============ 概览 ============ */
+function loadOverview() {
+  adminFetch('/api/status').then(function(r){ return r.json(); }).then(function(s){
+    var html = '';
+    html += '<div class="cell"><span>索引站点(页面)</span><b>' + s.sites + '</b></div>';
+    html += '<div class="cell"><span>索引词表</span><b>' + (s.terms || '-') + '</b></div>';
+    html += '<div class="cell"><span>分块数</span><b>' + (s.blocks || '-') + '</b></div>';
+    html += '<div class="cell"><span>黑名单</span><b>' + (s.blacklist || 0) + '</b></div>';
+    html += '<div class="cell"><span>版本</span><b style="font-size:16px">' + esc(s.version || '') + '</b></div>';
+    html += '<div class="cell"><span>服务</span><b style="font-size:16px">' + (s.admin_enabled ? '管理已启用' : '管理未启用') + '</b></div>';
+    document.getElementById('overviewKv').innerHTML = html;
+  }).catch(function(){});
+}
+
+/* ============ 穷举 ============ */
+function startScan() {
+  var maxLen = parseInt(document.getElementById('scanMaxLen').value, 10) || 2;
+  var workers = parseInt(document.getElementById('scanWorkers').value, 10) || 64;
+  if (maxLen < 1 || maxLen > 20) { setMsg('msg', '最大位数范围 1-20', 'err'); return; }
+  adminFetch('/api/admin/scan', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({max_len:maxLen, workers:workers})
+  }).then(function(r){ return r.json().then(function(d){ return {status:r.status, d:d}; }); }).then(function(res){
+    if (res.status === 202) setMsg('msg', '穷举已启动(位数 ' + maxLen + ',并发 ' + workers + ')', 'ok');
+    else setMsg('msg', '启动失败: ' + (res.d.error || res.status), 'err');
+    pollScan();
+  }).catch(function(e){ setMsg('msg', '请求失败: ' + e, 'err'); });
+}
+
+function rebuildIndex() {
+  if (!confirm('重建索引需要扫描全部站点,期间搜索仍可用。继续?')) return;
+  setMsg('msg', '正在重建索引(大索引可能需要几分钟)...', 'warn');
+  adminFetch('/api/admin/rebuild', { method: 'POST' }).then(function(r){ return r.json(); }).then(function(d){
+    setMsg('msg', '索引重建完成: ' + d.sites + ' 个站点/页面', 'ok');
+    loadOverview();
+  }).catch(function(e){ setMsg('msg', '重建失败: ' + e, 'err'); });
+}
+
+function pollScan() {
+  adminFetch('/api/admin/scan-status').then(function(r){ return r.json(); }).then(function(s){
+    var bar = document.getElementById('scanBar');
+    var txt = document.getElementById('scanText');
+    var gt = parseFloat(s.grand_total) || 0;
+    var pct = gt > 0 ? Math.min(100, Math.round(s.total / gt * 100)) : 0;
+    bar.style.width = pct + '%';
+    if (s.running) {
+      txt.textContent = '扫描中: ' + s.total + ' / ' + (s.grand_total || '?') + ' (' + pct + '%) · 可用=' + s.available + ' · 已注册=' + s.registered + ' · 建站=' + s.sites;
+    } else if (s.finished) {
+      txt.textContent = '上次扫描完成: ' + s.total + ' 个域名(可用=' + s.available + ' · 已注册=' + s.registered + ' · 建站=' + s.sites + ')';
+    } else {
+      txt.textContent = '暂无扫描任务';
+    }
+  }).catch(function(){});
+}
+
+/* ============ 配置 ============ */
+function loadConfigs() {
+  adminFetch('/api/admin/config').then(function(r){ return r.json(); }).then(function(d){
+    if (d.tld) document.getElementById('tldEdit').value = d.tld;
+    if (d.dns) document.getElementById('dnsEdit').value = d.dns;
+  }).catch(function(){});
+}
+function saveConfig(kind) {
+  var content = kind === 'tld' ? document.getElementById('tldEdit').value : document.getElementById('dnsEdit').value;
+  adminFetch('/api/admin/config/' + kind, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({content: content})
+  }).then(function(r){ return r.json().then(function(d){ return {status:r.status, d:d}; }); }).then(function(res){
+    setMsg('msg', res.status === 200 ? (kind === 'tld' ? '后缀列表已保存' : 'DNS 列表已保存') : ('保存失败: ' + (res.d.error || res.status)), res.status === 200 ? 'ok' : 'err');
+  }).catch(function(e){ setMsg('msg', '保存失败: ' + e, 'err'); });
+}
+
+/* ============ Token ============ */
+function loadTokens() {
+  adminFetch('/api/admin/tokens').then(function(r){ return r.json(); }).then(function(d){
+    var list = d.tokens || [];
+    var el = document.getElementById('tokList');
+    if (!list.length) { el.innerHTML = '<div class="sub" style="margin:0">尚未签发 token</div>'; return; }
+    el.innerHTML = list.map(function(t){
+      return '<div class="list-item"><b>' + esc(t.name) + '</b><span class="tag">' + esc(t.prefix) + '...</span><span class="tag">' + new Date(t.created*1000).toLocaleString() + '</span><a class="link red" onclick="revokeToken(\'' + t.id + '\')">撤销</a></div>';
+    }).join('');
+  }).catch(function(){});
+}
+function issueToken() {
+  var name = document.getElementById('tokName').value.trim();
+  if (!name) { setMsg('msg', '请填写 token 名称', 'err'); return; }
+  adminFetch('/api/admin/tokens', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({name:name})
+  }).then(function(r){ return r.json().then(function(d){ return {status:r.status, d:d}; }); }).then(function(res){
+    if (res.status === 201) {
+      document.getElementById('newTokenBox').style.display = 'block';
+      document.getElementById('newTokenValue').textContent = res.d.token;
+      setMsg('msg', 'token 已签发: ' + res.d.name, 'ok');
+      document.getElementById('tokName').value = '';
+      loadTokens();
+    } else setMsg('msg', '签发失败: ' + (res.d.error || res.status), 'err');
+  }).catch(function(e){ setMsg('msg', '签发失败: ' + e, 'err'); });
+}
+function revokeToken(id) {
+  if (!confirm('确认撤销该 token?')) return;
+  adminFetch('/api/admin/tokens/' + id, { method: 'DELETE' }).then(function(r){
+    setMsg('msg', r.status === 200 ? 'token 已撤销' : '撤销失败', r.status === 200 ? 'ok' : 'err');
+    loadTokens();
+  });
+}
+
+/* ============ 黑名单 ============ */
+function loadBlacklist() {
+  adminFetch('/api/admin/blacklist').then(function(r){ return r.json(); }).then(function(d){
+    var list = d.blacklist || [];
+    var el = document.getElementById('blList');
+    if (!list.length) { el.innerHTML = '<div class="sub" style="margin:0">黑名单为空</div>'; return; }
+    el.innerHTML = list.map(function(b){
+      var reason = b.reason === 'manual' ? '手动拉黑' : esc(b.reason);
+      return '<div class="list-item"><b>' + esc(b.domain) + '</b><span class="tag">' + reason + '</span><span class="tag">' + new Date(b.added_at*1000).toLocaleString() + '</span><a class="link" onclick="removeBlacklist(\'' + esc(b.domain) + '\')">解除</a></div>';
+    }).join('');
+  }).catch(function(){});
+}
+function addBlacklist() {
+  var domain = document.getElementById('blDomain').value.trim();
+  if (!domain) { setMsg('msg', '请填写要拉黑的域名', 'err'); return; }
+  adminFetch('/api/admin/blacklist', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({domain:domain})
+  }).then(function(r){
+    setMsg('msg', r.status === 200 ? '已拉黑 ' + domain : '拉黑失败', r.status === 200 ? 'ok' : 'err');
+    if (r.status === 200) { document.getElementById('blDomain').value = ''; loadBlacklist(); }
+  });
+}
+function removeBlacklist(domain) {
+  if (!confirm('解除拉黑 ' + domain + '?')) return;
+  adminFetch('/api/admin/blacklist/' + encodeURIComponent(domain), { method: 'DELETE' }).then(function(r){
+    setMsg('msg', r.status === 200 ? '已解除 ' + domain : '解除失败', r.status === 200 ? 'ok' : 'err');
+    loadBlacklist();
+  });
+}
+
+/* ============ 初始化 ============ */
+function init() {
+  loadOverview();
+  pollScan();
+  setInterval(pollScan, 3000);
+  loadConfigs();
+  loadTokens();
+  loadBlacklist();
+}
+(function(){
+  if (token) {
+    adminFetch('/api/admin/status').then(function(r){
+      if (r.status === 200) {
+        document.getElementById('loginWrap').style.display = 'none';
+        document.getElementById('panelBox').style.display = 'flex';
+        init();
+      } else {
+        localStorage.removeItem('pilseo_admin_session');
+        token = '';
+      }
+    }).catch(function(){});
+  }
+})();
+</script>
+</body>
+</html>

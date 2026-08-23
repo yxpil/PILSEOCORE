@@ -163,6 +163,7 @@ fn call_tool(engine: &SearchEngine, name: &str, args: &Json) -> Json {
                         ("description", Json::str(&h.description)),
                         ("score", Json::num(h.score)),
                         ("fold_count", Json::num(h.fold_count as f64)),
+                        ("dup_count", Json::num(h.dup_count as f64)),
                     ])
                 })
                 .collect();

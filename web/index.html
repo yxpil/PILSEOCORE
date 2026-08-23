@@ -233,6 +233,7 @@ function render(d, q) {
     html += '<a class="title" href="' + esc(r.url) + '" target="_blank">' + esc(r.title) + '</a>';
     html += '<div class="desc">' + esc(r.description || '') + '</div>';
     if (r.fold_count > 1) html += '<div class="kw">另有 ' + (r.fold_count - 1) + ' 个相同标题站点</div>';
+    if (r.dup_count > 1) html += '<div class="kw">另有 ' + (r.dup_count - 1) + ' 个相同内容站点</div>';
     html += '</div>';
   });
   // 分页导航
@@ -289,8 +290,8 @@ function adminFetch(path, opts) {
 }
 
 function openAdmin() {
-  document.getElementById('adminMask').style.display = 'block';
-  if (getToken()) { adminLogin(); }
+  // 管理后台已迁移到独立页面(左右布局面板)
+  location.href = '/admin';
 }
 
 function closeAdmin() {

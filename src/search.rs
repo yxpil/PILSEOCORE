@@ -28,6 +28,8 @@ pub struct SearchHit {
     pub score: f64,
     /// 相同标题折叠后的组大小(>1 表示还有 N-1 个相同标题站点)
     pub fold_count: usize,
+    /// 内容重复计数:相同/雷同内容的站点总数(计数去重,仅保留一条)
+    pub dup_count: usize,
 }
 
 pub struct SearchEngine {
@@ -239,6 +241,7 @@ impl SearchEngine {
                         url: doc.url.clone(),
                         score,
                         fold_count: 1,
+                        dup_count: doc.dup_count,
                     },
                     1,
                 ));
@@ -403,6 +406,7 @@ mod tests {
             description: desc.to_string(),
             url: format!("https://{}/", domain),
             keywords: kw.iter().map(|s| s.to_string()).collect(),
+            dup_count: 1,
         }
     }
 
