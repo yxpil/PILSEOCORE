@@ -1,8 +1,10 @@
 //! API 服务:HTTP 路由 + 权限控制 + Web UI + API 文档
 //!
-//! 角色:
-//!   普通用户(无令牌)      -> 只读:搜索/联想/状态/站点地图/文档/UI
-//!   管理员(Bearer token)  -> 全部 + 触发穷举遍历/配置后缀与DNS/重建索引
+//! 角色与认证:
+//!   普通用户(无凭证)      -> 只读:搜索/联想/状态/站点地图/文档/UI
+//!   管理员:
+//!     - Web UI 登录:账号密码(admin_user/admin_pass) -> 会话 token
+//!     - API / MCP:管理员签发的 token(Authorization: Bearer <token>)
 //!
 //! 路由:
 //!   GET  /                          Web UI(Google 风格)
@@ -12,7 +14,9 @@
 //!   GET  /api/search                搜索(公开)
 //!   GET  /api/suggest               联想(公开)
 //!   GET  /api/sitemap               站点地图(公开)
-//!   ---- 以下需管理员 ----
+//!   POST /api/auth/login            管理员账号密码登录
+//!   POST /api/auth/logout           登出
+//!   ---- 以下需管理员(会话 token 或签发 token) ----
 //!   GET  /api/admin/status          扫描状态 + 配置概要
 //!   GET  /api/admin/scan-status     扫描状态
 //!   POST /api/admin/scan            触发穷举遍历
@@ -20,12 +24,16 @@
 //!   POST /api/admin/config/tld      保存后缀列表
 //!   POST /api/admin/config/dns      保存 DNS 列表
 //!   POST /api/admin/rebuild         重建索引
+//!   GET  /api/admin/tokens          已签发 token 列表
+//!   POST /api/admin/tokens          签发新 token
+//!   DELETE /api/admin/tokens/<id>   撤销 token
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::ai::AiConfig;
+use crate::auth::{Sessions, TokenStore};
 use crate::http::{Request, Response};
 use crate::json::Json;
 use crate::search::SearchEngine;
@@ -75,28 +83,45 @@ impl Default for ScanState {
 pub struct ServerCtx {
     pub engine: Arc<SearchEngine>,
     pub ai: AiConfig,
-    pub admin_token: String,
+    pub admin_user: String,
+    pub admin_pass: String,
+    pub tokens: TokenStore,
+    pub sessions: Sessions,
     pub scan: Arc<Mutex<ScanState>>,
 }
 
 impl ServerCtx {
-    pub fn new(engine: Arc<SearchEngine>, ai: AiConfig, admin_token: String) -> ServerCtx {
+    pub fn new(
+        engine: Arc<SearchEngine>,
+        ai: AiConfig,
+        admin_user: String,
+        admin_pass: String,
+        tokens: TokenStore,
+        sessions: Sessions,
+    ) -> ServerCtx {
         ServerCtx {
             engine,
             ai,
-            admin_token,
+            admin_user,
+            admin_pass,
+            tokens,
+            sessions,
             scan: Arc::new(Mutex::new(ScanState::default())),
         }
     }
 
-    /// 管理员校验:Authorization: Bearer <token> 且与配置一致
+    pub fn admin_enabled(&self) -> bool {
+        !self.admin_user.is_empty() && !self.admin_pass.is_empty()
+    }
+
+    /// 管理员校验:Authorization: Bearer <token>,token 为登录会话或管理员签发
     fn is_admin(&self, req: &Request) -> bool {
-        if self.admin_token.is_empty() {
-            return false; // 未配置令牌 => 管理功能禁用
-        }
         let auth = req.header("authorization").unwrap_or("");
         let token = auth.strip_prefix("Bearer ").unwrap_or("").trim();
-        !token.is_empty() && token == self.admin_token
+        if token.is_empty() {
+            return false;
+        }
+        self.sessions.verify(token) || self.tokens.verify(token)
     }
 }
 
@@ -110,7 +135,10 @@ pub fn handle(ctx: &ServerCtx, req: &Request) -> Response {
         ("GET", "/api/search") => api_search(ctx, req),
         ("GET", "/api/suggest") => api_suggest(ctx, req),
         ("GET", "/api/sitemap") => api_sitemap(ctx, req),
-        // ---- 管理员区 ----
+        // ---- 认证 ----
+        ("POST", "/api/auth/login") => api_login(ctx, req),
+        ("POST", "/api/auth/logout") => api_logout(ctx, req),
+        // ---- 管理员区(会话 token 或签发 token) ----
         ("GET", "/api/admin/status") => admin_guard(ctx, req, |ctx| admin_status(ctx)),
         ("GET", "/api/admin/scan-status") => admin_guard(ctx, req, |ctx| admin_scan_status(ctx)),
         ("POST", "/api/admin/scan") => admin_guard(ctx, req, |ctx| admin_scan(ctx, req)),
@@ -119,6 +147,13 @@ pub fn handle(ctx: &ServerCtx, req: &Request) -> Response {
         ("POST", "/api/admin/config/dns") => admin_guard(ctx, req, |ctx| admin_config_save(ctx, req, "dns")),
         ("POST", "/api/admin/rebuild") => admin_guard(ctx, req, |ctx| admin_rebuild(ctx)),
         ("POST", "/api/rebuild") => admin_guard(ctx, req, |ctx| admin_rebuild(ctx)), // 旧路径,现需管理员
+        ("GET", "/api/admin/tokens") => admin_guard(ctx, req, |ctx| admin_tokens_list(ctx)),
+        ("POST", "/api/admin/tokens") => admin_guard(ctx, req, |ctx| admin_tokens_create(ctx, req)),
+        ("DELETE", "/api/admin/tokens/") => Response::json(400, r#"{"error":"缺少 token id"}"#),
+        ("DELETE", p) if p.starts_with("/api/admin/tokens/") => {
+            let id = &p["/api/admin/tokens/".len()..];
+            admin_guard(ctx, req, |ctx| admin_tokens_revoke(ctx, id))
+        }
         _ => Response::not_found(),
     }
 }
@@ -126,10 +161,10 @@ pub fn handle(ctx: &ServerCtx, req: &Request) -> Response {
 /// 管理员守卫:无权限返回 403
 fn admin_guard(ctx: &ServerCtx, req: &Request, f: impl Fn(&ServerCtx) -> Response) -> Response {
     if !ctx.is_admin(req) {
-        let msg = if ctx.admin_token.is_empty() {
-            r#"{"error":"管理功能未启用:请先在 config/engine.conf 配置 admin_token"}"#
+        let msg = if !ctx.admin_enabled() {
+            r#"{"error":"管理功能未启用:请先在 config/engine.conf 配置 admin_user/admin_pass"}"#
         } else {
-            r#"{"error":"无管理员权限:需请求头 Authorization: Bearer <admin_token>"}"#
+            r#"{"error":"无管理员权限:请用账号密码登录(/api/auth/login),或使用管理员签发的 API token"}"#
         };
         return Response::json(403, msg);
     }
@@ -155,7 +190,7 @@ fn api_status(ctx: &ServerCtx) -> Response {
         ("cache_hits", Json::num(hits as f64)),
         ("cache_misses", Json::num(misses as f64)),
         ("cache_hit_rate", Json::num(if hits + misses > 0 { hits as f64 / (hits + misses) as f64 } else { 0.0 })),
-        ("admin_enabled", Json::Bool(!ctx.admin_token.is_empty())),
+        ("admin_enabled", Json::Bool(ctx.admin_enabled())),
         ("scan_running", Json::Bool(ctx.scan.lock().unwrap().running)),
     ]);
     Response::json(200, &j.to_string())
@@ -274,6 +309,83 @@ fn api_sitemap(ctx: &ServerCtx, req: &Request) -> Response {
         ("urls", Json::arr(urls.into_iter().map(Json::str).collect())),
     ]);
     Response::json(200, &j.to_string())
+}
+
+// ---------------- 认证 ----------------
+
+/// 账号密码登录:成功返回会话 token(管理员 Web UI 用)
+fn api_login(ctx: &ServerCtx, req: &Request) -> Response {
+    if !ctx.admin_enabled() {
+        return Response::json(403, r#"{"error":"管理功能未启用:请先在 config/engine.conf 配置 admin_user/admin_pass"}"#);
+    }
+    let body = String::from_utf8_lossy(&req.body);
+    let params = crate::json::parse(&body).unwrap_or(Json::obj());
+    let user = params.get("username").and_then(|v| v.as_str()).unwrap_or("");
+    let pass = params.get("password").and_then(|v| v.as_str()).unwrap_or("");
+    if user == ctx.admin_user && pass == ctx.admin_pass {
+        let token = ctx.sessions.create();
+        Response::json(200, &Json::build(vec![
+            ("status", Json::str("ok")),
+            ("token", Json::str(&token)),
+            ("expires_in", Json::num(12.0 * 3600.0)),
+            ("user", Json::str(user)),
+        ]).to_string())
+    } else {
+        Response::json(401, r#"{"error":"用户名或密码错误"}"#)
+    }
+}
+
+/// 登出:销毁会话 token
+fn api_logout(ctx: &ServerCtx, req: &Request) -> Response {
+    let auth = req.header("authorization").unwrap_or("");
+    if let Some(token) = auth.strip_prefix("Bearer ") {
+        ctx.sessions.remove(token.trim());
+    }
+    Response::json(200, r#"{"status":"ok"}"#)
+}
+
+// ---------------- Token 管理(管理员签发给 API/MCP) ----------------
+
+fn admin_tokens_list(ctx: &ServerCtx) -> Response {
+    let list: Vec<Json> = ctx
+        .tokens
+        .list()
+        .iter()
+        .map(|t| {
+            Json::build(vec![
+                ("id", Json::str(&t.id)),
+                ("name", Json::str(&t.name)),
+                ("created", Json::num(t.created as f64)),
+                ("last_used", Json::num(t.last_used as f64)),
+                ("prefix", Json::str(&t.token[..8.min(t.token.len())])),
+            ])
+        })
+        .collect();
+    Response::json(200, &Json::build(vec![("tokens", Json::arr(list))]).to_string())
+}
+
+fn admin_tokens_create(ctx: &ServerCtx, req: &Request) -> Response {
+    let body = String::from_utf8_lossy(&req.body);
+    let params = crate::json::parse(&body).unwrap_or(Json::obj());
+    let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    if name.is_empty() {
+        return Response::json(400, r#"{"error":"缺少参数 name(token 用途名称)"}"#);
+    }
+    let token = ctx.tokens.create(&name);
+    Response::json(201, &Json::build(vec![
+        ("status", Json::str("ok")),
+        ("name", Json::str(&name)),
+        ("token", Json::str(&token)),
+        ("note", Json::str("token 仅此一次完整显示,请立即保存;调用时用 Authorization: Bearer <token>")),
+    ]).to_string())
+}
+
+fn admin_tokens_revoke(ctx: &ServerCtx, id: &str) -> Response {
+    if ctx.tokens.revoke(id) {
+        Response::json(200, &Json::build(vec![("status", Json::str("ok")), ("revoked", Json::str(id))]).to_string())
+    } else {
+        Response::json(404, r#"{"error":"token 不存在"}"#)
+    }
 }
 
 // ---------------- 管理员 API ----------------

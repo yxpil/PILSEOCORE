@@ -54,34 +54,33 @@ pilseocore mcp                              # MCP Server(stdio)
 | 角色 | 认证 | 权限 |
 |---|---|---|
 | 普通用户 | 无需认证 | 搜索、联想、状态、站点地图、API 文档、Web UI(只读) |
-| 管理员 | 请求头 `Authorization: Bearer <admin_token>` | 全部 + 触发穷举遍历、配置后缀/DNS 列表、重建索引 |
+| 管理员 | **账号密码登录** Web UI,或使用**管理员签发的 token** | 全部 + 触发穷举遍历、配置后缀/DNS 列表、重建索引、签发/撤销 token |
 
-在 `config/engine.conf` 配置 `admin_token`(默认示例 `pilseo_admin_2026`,请修改);留空则管理功能整体禁用,所有管理接口返回 403。
-
-管理接口(Web UI 点"管理"登录后可直接操作):
+**登录**:管理员在 Web UI 点"管理",用 `admin_user` / `admin_pass`(engine.conf)登录。
+**Token 签发**:登录后可在管理面板"签发 token"(命名、撤销,存于 `data/tokens.json`),token 给 **API 客户端与 MCP** 使用——像 GitHub personal access token。
 
 ```bash
-# 触发穷举遍历(后台运行,完成后自动重建索引)
+# 1) 登录拿会话 token
+curl -X POST http://127.0.0.1:8891/api/auth/login \
+  -H "Content-Type: application/json" -d '{"username":"admin","password":"你的密码"}'
+# => {"token":"<会话token>",...}
+
+# 2) 签发 API/MCP token
+curl -X POST http://127.0.0.1:8891/api/admin/tokens \
+  -H "Authorization: Bearer <会话token>" -H "Content-Type: application/json" \
+  -d '{"name":"mcp-server"}'
+# => {"token":"<完整token,仅此一次>",...}
+
+# 3) 用签发 token 调用管理 API
 curl -X POST http://127.0.0.1:8891/api/admin/scan \
-  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <签发token>" -H "Content-Type: application/json" \
   -d '{"max_len":2,"workers":64}'
 
-# 查看扫描状态
-curl http://127.0.0.1:8891/api/admin/scan-status -H "Authorization: Bearer <token>"
-
-# 保存域名后缀列表(空格分隔,按此顺序遍历)
-curl -X POST http://127.0.0.1:8891/api/admin/config/tld \
-  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
-  -d '{"content":"com net org io cn"}'
-
-# 保存 DNS 列表(每行一个)
-curl -X POST http://127.0.0.1:8891/api/admin/config/dns \
-  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
-  -d '{"content":"8.8.8.8\n223.5.5.5"}'
-
-# 重建索引
-curl -X POST http://127.0.0.1:8891/api/admin/rebuild -H "Authorization: Bearer <token>"
+# 4) MCP 用签发 token 启动(或环境变量 PILSEO_TOKEN)
+pilseocore mcp --token <签发token>
 ```
+
+`admin_user`/`admin_pass` 留空则管理功能整体禁用(管理接口返回 403)。
 
 ### 配置(config/engine.conf)
 
@@ -101,7 +100,8 @@ curl -X POST http://127.0.0.1:8891/api/admin/rebuild -H "Authorization: Bearer <
 | `hot_cache_size` / `hot_cache_ttl` | 热点缓存容量/TTL | `1000` / `60` |
 | `ai_enabled` | AI 摘要开关 | `false` |
 | `ai_endpoint` / `ai_model` | AI 端点/模型 | 本地 llama-server |
-| `admin_token` | 管理员令牌(留空=管理禁用) | `pilseo_admin_2026` |
+| `admin_user` / `admin_pass` | 管理员账号密码(登录 Web UI) | `admin` / `pilseo_admin_2026` |
+| API/MCP token | 登录后签发(存 data/tokens.json) | 空 |
 
 ### 输出
 

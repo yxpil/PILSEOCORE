@@ -117,8 +117,10 @@
     <h2>管理员控制台</h2>
     <div class="sub">普通用户仅可搜索;管理员可触发穷举遍历、配置域名后缀与 DNS</div>
     <div id="loginBox">
-      <label>管理员令牌</label>
-      <input type="password" id="adminToken" placeholder="输入 admin_token" onkeydown="if(event.key==='Enter')adminLogin()">
+      <label>管理员账号</label>
+      <input type="text" id="adminUser" placeholder="admin_user" onkeydown="if(event.key==='Enter')adminLogin()">
+      <label>密码</label>
+      <input type="password" id="adminPass" placeholder="admin_pass" onkeydown="if(event.key==='Enter')adminLogin()">
       <div class="msg" id="loginMsg"></div>
       <button class="btn" onclick="adminLogin()">登录</button>
     </div>
@@ -139,6 +141,19 @@
       <label>DNS 服务器列表(每行一个,随机负载均衡)</label>
       <textarea id="dnsEdit"></textarea>
       <button class="btn secondary" onclick="saveConfig('dns')">保存 DNS 列表</button>
+
+      <label>API / MCP 访问令牌(管理员签发,用于 API 请求与 MCP 启动)</label>
+      <div id="tokenArea" style="margin-top:6px">
+        <div class="row">
+          <div><input type="text" id="tokenName" placeholder="用途名称,如 mcp-server"></div>
+          <div style="flex:0 0 auto"><button class="btn secondary" onclick="createToken()">签发 token</button></div>
+        </div>
+        <div id="tokenList" style="margin-top:8px"></div>
+        <div id="newTokenBox" style="display:none; margin-top:10px; background:#f8f9fa; border:1px solid var(--line); border-radius:8px; padding:12px 14px;">
+          <div style="font-size:12px; color:var(--gray); margin-bottom:6px">新 token(仅显示一次,请立即复制保存)</div>
+          <code id="newTokenValue" style="word-break:break-all; font-size:13px; color:#c5221f; user-select:all"></code>
+        </div>
+      </div>
       <div class="msg" id="adminMsg"></div>
     </div>
   </div>
@@ -231,7 +246,7 @@ function hidePanel() { document.getElementById('panel').style.display = 'none'; 
 function esc(s) { return String(s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
 
 /* ============ 管理员控制台 ============ */
-function getToken() { return localStorage.getItem('pilseo_admin_token') || ''; }
+function getToken() { return localStorage.getItem('pilseo_admin_session') || ''; }
 function adminFetch(path, opts) {
   opts = opts || {};
   opts.headers = opts.headers || {};
@@ -250,25 +265,44 @@ function closeAdmin() {
 }
 
 function adminLogin() {
-  var token = document.getElementById('adminToken').value.trim();
-  if (!token) token = getToken();
-  if (!token) { setMsg('loginMsg', '请输入管理员令牌', 'err'); return; }
-  localStorage.setItem('pilseo_admin_token', token);
-  adminFetch('/api/admin/status').then(function(r){ return r.json().then(function(d){ return {status:r.status, d:d}; }); }).then(function(res){
+  var user = document.getElementById('adminUser').value.trim();
+  var pass = document.getElementById('adminPass').value;
+  // 已登录(有会话 token)且未输入新账号时直接验证会话
+  if (!user && !pass && getToken()) { user = '__session__'; }
+  if (!user || !pass) {
+    if (getToken()) { verifySession(); return; }
+    setMsg('loginMsg', '请输入管理员账号和密码', 'err');
+    return;
+  }
+  fetch('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: user, password: pass })
+  }).then(function(r){ return r.json().then(function(d){ return {status:r.status, d:d}; }); }).then(function(res){
     if (res.status === 200) {
-      document.getElementById('loginBox').style.display = 'none';
-      document.getElementById('panelBox').style.display = 'block';
-      setMsg('adminMsg', '管理员已验证', 'ok');
-      loadConfigs();
-      pollScan();
-      scanPoll = setInterval(pollScan, 3000);
+      localStorage.setItem('pilseo_admin_session', res.d.token);
+      enterPanel();
     } else {
-      localStorage.removeItem('pilseo_admin_token');
-      setMsg('loginMsg', '令牌无效: ' + (res.d.error || res.status), 'err');
+      setMsg('loginMsg', '登录失败: ' + (res.d.error || res.status), 'err');
     }
-  }).catch(function(e){
-    setMsg('loginMsg', '请求失败: ' + e, 'err');
-  });
+  }).catch(function(e){ setMsg('loginMsg', '请求失败: ' + e, 'err'); });
+}
+
+function verifySession() {
+  adminFetch('/api/admin/status').then(function(r){
+    if (r.status === 200) enterPanel();
+    else { localStorage.removeItem('pilseo_admin_session'); setMsg('loginMsg', '会话已过期,请重新登录', 'err'); }
+  }).catch(function(){ setMsg('loginMsg', '会话已过期,请重新登录', 'err'); });
+}
+
+function enterPanel() {
+  document.getElementById('loginBox').style.display = 'none';
+  document.getElementById('panelBox').style.display = 'block';
+  setMsg('adminMsg', '管理员已验证', 'ok');
+  loadConfigs();
+  loadTokens();
+  pollScan();
+  scanPoll = setInterval(pollScan, 3000);
 }
 
 function setMsg(id, text, cls) {
@@ -299,6 +333,50 @@ function saveConfig(kind) {
       setMsg('adminMsg', '保存失败: ' + (res.d.error || res.status), 'err');
     }
   }).catch(function(e){ setMsg('adminMsg', '保存失败: ' + e, 'err'); });
+}
+
+/* ---- API/MCP token 管理 ---- */
+function loadTokens() {
+  adminFetch('/api/admin/tokens').then(function(r){ return r.json(); }).then(function(d){
+    var list = d.tokens || [];
+    var el = document.getElementById('tokenList');
+    if (!list.length) { el.innerHTML = '<div style="font-size:12px; color:var(--gray)">尚未签发 token</div>'; return; }
+    el.innerHTML = list.map(function(t){
+      return '<div style="display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--line); font-size:13px">' +
+        '<b style="flex:1">' + esc(t.name) + '</b>' +
+        '<span style="color:var(--gray)">' + esc(t.prefix) + '...</span>' +
+        '<span style="color:var(--gray)">' + new Date(t.created * 1000).toLocaleString() + '</span>' +
+        '<a style="color:var(--red); cursor:pointer" onclick="revokeToken(\'' + t.id + '\')">撤销</a></div>';
+    }).join('');
+  }).catch(function(){});
+}
+
+function createToken() {
+  var name = document.getElementById('tokenName').value.trim();
+  if (!name) { setMsg('adminMsg', '请填写 token 用途名称', 'err'); return; }
+  adminFetch('/api/admin/tokens', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name })
+  }).then(function(r){ return r.json().then(function(d){ return {status:r.status, d:d}; }); }).then(function(res){
+    if (res.status === 201) {
+      document.getElementById('newTokenBox').style.display = 'block';
+      document.getElementById('newTokenValue').textContent = res.d.token;
+      setMsg('adminMsg', 'token 已签发: ' + res.d.name, 'ok');
+      document.getElementById('tokenName').value = '';
+      loadTokens();
+    } else {
+      setMsg('adminMsg', '签发失败: ' + (res.d.error || res.status), 'err');
+    }
+  }).catch(function(e){ setMsg('adminMsg', '签发失败: ' + e, 'err'); });
+}
+
+function revokeToken(id) {
+  if (!confirm('确认撤销该 token?')) return;
+  adminFetch('/api/admin/tokens/' + id, { method: 'DELETE' }).then(function(r){
+    if (r.status === 200) { setMsg('adminMsg', 'token 已撤销', 'ok'); loadTokens(); }
+    else setMsg('adminMsg', '撤销失败', 'err');
+  });
 }
 
 function startScan() {

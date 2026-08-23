@@ -8,6 +8,7 @@
 //!   mcp                启动 MCP Server(stdio,供 AI 客户端调用)
 
 mod ai;
+mod auth;
 mod config;
 mod dns;
 mod engine;
@@ -72,7 +73,7 @@ fn real_main() -> Result<(), String> {
                 let q = args.get(1).cloned().unwrap_or_default();
                 return cmd_search(&q);
             }
-            "mcp" => return cmd_mcp(),
+            "mcp" => return cmd_mcp(&args[1..]),
             _ => {}
         }
     }
@@ -251,13 +252,22 @@ fn cmd_serve(args: &[String]) -> Result<(), String> {
     } else {
         println!("[ai] 未启用(engine.conf 中 ai_enabled = true 可开启 AI 摘要)");
     }
-    if cfg.admin_token.is_empty() {
-        println!("[admin] 管理功能禁用(engine.conf 配置 admin_token 后,管理员可触发穷举/改配置)");
+    if cfg.admin_user.is_empty() || cfg.admin_pass.is_empty() {
+        println!("[admin] 管理功能未启用(engine.conf 配置 admin_user/admin_pass 后,管理员可登录并签发 API token)");
     } else {
-        println!("[admin] 管理功能已启用(Authorization: Bearer <admin_token>)");
+        println!("[admin] 管理账号: {} (登录 Web UI 管理面板签发 API/MCP token)", cfg.admin_user);
     }
 
-    let ctx = Arc::new(server::ServerCtx::new(engine, ai_cfg, cfg.admin_token.clone()));
+    let tokens = crate::auth::TokenStore::load(std::path::Path::new("data"));
+    let sessions = crate::auth::Sessions::new(12 * 3600); // 会话 12 小时
+    let ctx = Arc::new(server::ServerCtx::new(
+        engine,
+        ai_cfg,
+        cfg.admin_user.clone(),
+        cfg.admin_pass.clone(),
+        tokens,
+        sessions,
+    ));
     let addr = format!("127.0.0.1:{}", port);
     http::serve(&addr, move |req| {
         let ctx = ctx.clone();
@@ -295,9 +305,36 @@ fn cmd_search(q: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_mcp() -> Result<(), String> {
+fn cmd_mcp(args: &[String]) -> Result<(), String> {
+    // MCP 需要管理员签发的 token(Web UI 管理面板签发):pilseocore mcp --token <token>
+    let mut token: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--token" => {
+                i += 1;
+                token = Some(args.get(i).ok_or("--token 缺少参数")?.clone());
+            }
+            "-h" | "--help" => {
+                usage();
+                return Ok(());
+            }
+            other => return Err(format!("mcp 未知参数: {}", other)),
+        }
+        i += 1;
+    }
     let cfg = config::load_config(&std::path::Path::new("config/engine.conf"))?;
     let engine = load_or_build_index(&cfg, false)?;
-    println!("[mcp] PILSEOCORE MCP Server 已启动(stdio)");
+    let tokens = crate::auth::TokenStore::load(std::path::Path::new("data"));
+    let token = token.or_else(|| std::env::var("PILSEO_TOKEN").ok());
+    let Some(token) = token else {
+        return Err(
+            "MCP 需要管理员签发的 token:\n  pilseocore mcp --token <token>\n(在 Web UI 管理面板签发;也可设环境变量 PILSEO_TOKEN)".into(),
+        );
+    };
+    if !tokens.verify(&token) {
+        return Err("MCP token 无效:请在 Web UI 管理面板重新签发".into());
+    }
+    println!("[mcp] PILSEOCORE MCP Server 已启动(stdio,管理员 token 已验证)");
     mcp::serve(&engine)
 }

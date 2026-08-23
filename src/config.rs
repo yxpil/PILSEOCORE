@@ -27,8 +27,9 @@ pub struct Config {
     pub ai_endpoint: String,
     pub ai_model: String,
     pub ai_api_key: String,
-    // 管理员控制
-    pub admin_token: String,
+    // 管理员控制:账号密码登录 Web UI;token 由管理员签发给 API/MCP
+    pub admin_user: String,
+    pub admin_pass: String,
 }
 
 impl Default for Config {
@@ -54,7 +55,8 @@ impl Default for Config {
             ai_endpoint: "http://127.0.0.1:11434/v1/chat/completions".into(),
             ai_model: "qwen3:8b".into(),
             ai_api_key: String::new(),
-            admin_token: String::new(),
+            admin_user: "admin".into(),
+            admin_pass: String::new(),
         }
     }
 }
@@ -159,7 +161,8 @@ pub fn load_config(path: &Path) -> Result<Config, String> {
             "ai_endpoint" => cfg.ai_endpoint = v.clone(),
             "ai_model" => cfg.ai_model = v.clone(),
             "ai_api_key" => cfg.ai_api_key = v.clone(),
-            "admin_token" => cfg.admin_token = v.clone(),
+            "admin_user" => cfg.admin_user = v.clone(),
+            "admin_pass" => cfg.admin_pass = v.clone(),
             _ => eprintln!("[warn] 忽略未知配置项: {}", k),
         }
     }
