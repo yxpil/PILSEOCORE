@@ -215,11 +215,11 @@ impl SearchEngine {
         // ---- 候选收集:BPE 核心词精确查倒排(O(1) 词表查找,不做全表遍历) ----
         let mut candidates: HashSet<usize> = HashSet::new();
         let terms: Vec<String> = if core.is_empty() {
-            // 纯单字节/无核心词查询:仍过滤低信息 token,
-            // 避免 UTF-8 字节残片(如 0xE5)命中所有中文文档导致不相关结果刷屏
+            // 纯单字节/无核心词查询:按与 core_terms 相同的低信息标准过滤
+            // (单字节/UTF-8 残片/TLD/单字),避免 0xE5 或"网"命中所有中文文档刷屏
             tok.tokenize_str(q)
                 .into_iter()
-                .filter(|t| t.len() >= 2 && !t.contains('\u{FFFD}'))
+                .filter(|t| !is_low_info_token(t))
                 .collect()
         } else {
             core.clone()
@@ -228,6 +228,10 @@ impl SearchEngine {
         // => 未登录词(语料低频,如"安卓"不在 BPE 词表):退化为全文档短语扫描,
         //    防止"明明有收录却搜不到";结果继续走相关度评分与折叠
         if terms.is_empty() {
+            // 纯 TLD / 纯标点 / 过短查询:短语扫描无意义,直接空
+            if is_tld_token(&phrase) || phrase.len() < 2 {
+                return (0, Vec::new());
+            }
             for (doc_id, doc) in idx.docs.iter().enumerate() {
                 if self.blacklist.is_blocked(&doc.domain) {
                     continue;
@@ -338,13 +342,37 @@ pub fn fold_key(title: &str, domain: &str) -> String {
     lower_t
 }
 
-/// 核心词:BPE 分词后的多字节 token(词/子词),去重,排除单字节噪音与 lossy 替换字符
+/// 纯 TLD token(".com"/".net"/"com"/"io" 等):信息量低,匹配所有同后缀站
+/// BPE 把 "gfan.com" 可能拆成 ["gfan","com"],无点形式也要识别
+fn is_tld_token(t: &str) -> bool {
+    // 带点形式:".com" / ".co.uk"
+    if t.starts_with('.') && t.len() <= 12 && t[1..].chars().all(|c| c.is_ascii_alphabetic() || c == '.') {
+        return true;
+    }
+    // 无点形式:纯小写字母且是常见 TLD
+    const TLDS: &[&str] = &[
+        "com", "net", "org", "cn", "co", "uk", "io", "cc", "tv", "me", "xyz", "top", "vip", "shop",
+        "site", "online", "app", "dev", "info", "biz", "us", "jp", "de", "ru", "fr", "au", "in", "hk", "tw", "kr", "sg",
+    ];
+    t.len() <= 6 && t.chars().all(|c| c.is_ascii_lowercase()) && TLDS.contains(&t)
+}
+
+/// 低信息 token 判定(单字节/lossy/TLD/单个汉字)
+fn is_low_info_token(t: &str) -> bool {
+    t.len() < 2
+        || t.contains('\u{FFFD}')
+        || is_tld_token(t)
+        || (t.chars().count() == 1 && t.len() == 3) // 单个汉字:如"网"命中所有网站站
+}
+
+/// 核心词:BPE 分词后的多字节 token(词/子词),去重,排除:
+/// 单字节噪音、lossy 替换字符、纯 TLD、单个汉字(信息量低,如'网'会命中所有网站)
 fn core_terms(q: &str, tok: &BpeTokenizer) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for t in tok.tokenize_str(q) {
-        // 跳过:单字节 token、lossy 替换字符(未合并的孤立字节)
-        if t.len() < 2 || t.contains('\u{FFFD}') {
+        // 跳过:单字节、lossy、TLD、单个汉字(信息量低,如"网"命中所有网站站)
+        if is_low_info_token(&t) {
             continue;
         }
         if seen.insert(t.clone()) {
@@ -505,6 +533,20 @@ mod tests {
         // 无关查询仍返回空
         let (total2, _) = engine.search("哔哩哔哩", 1, 10);
         assert_eq!(total2, 0, "语料外查询应返回空");
+    }
+
+    #[test]
+    fn tld_token_filtered() {
+        // ".com" 等 TLD token 信息量低,必须被过滤(否则匹配所有同后缀站)
+        assert!(is_tld_token(".com"));
+        assert!(is_tld_token(".net"));
+        assert!(is_tld_token(".co.uk"));
+        assert!(is_tld_token(".com.cn"));
+        assert!(is_tld_token("com"), "无点 TLD(BPE 拆 'gfan.com' 为 ['gfan','com'])");
+        assert!(is_tld_token("io"));
+        assert!(!is_tld_token("gfan"));
+        assert!(!is_tld_token("gfan.com"));
+        assert!(!is_tld_token("comic"), "非 TLD 的 com 前缀词不过滤");
     }
 
     #[test]
