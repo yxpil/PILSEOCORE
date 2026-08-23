@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PILSEOCORE API 文档</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:-apple-system,"Segoe UI","Microsoft YaHei",monospace; background:#fff; color:#202124; line-height:1.7; padding:40px 24px; }
+  .wrap { max-width:860px; margin:0 auto; }
+  h1 { font-size:26px; margin-bottom:6px; }
+  h2 { font-size:19px; margin:34px 0 10px; padding-bottom:6px; border-bottom:1px solid #e0e0e0; }
+  h3 { font-size:15px; margin:18px 0 6px; color:#4285f4; }
+  p { margin:6px 0; color:#4d5156; }
+  code { background:#f1f3f4; padding:2px 6px; border-radius:4px; font-size:13px; color:#c5221f; }
+  pre { background:#202124; color:#e8eaed; padding:14px 18px; border-radius:8px; overflow-x:auto; font-size:13px; margin:8px 0; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:13px; }
+  th, td { border:1px solid #e0e0e0; padding:8px 12px; text-align:left; }
+  th { background:#f8f9fa; }
+  .tag { display:inline-block; background:#e6f4ea; color:#137333; border-radius:4px; padding:1px 8px; font-size:12px; margin-right:6px; }
+  .endpoint { font-size:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>PILSEOCORE 本地搜索引擎 API 文档</h1>
+<p>版本 <code>v0.1.0</code> · 所有接口返回 JSON(UTF-8)· 支持 CORS</p>
+
+<h2>基础信息</h2>
+<p>服务地址: <code>http://127.0.0.1:8891</code>(可在 <code>config/engine.conf</code> 修改 <code>server_port</code>)</p>
+
+<h2>接口总览</h2>
+<table>
+<tr><th>方法</th><th>路径</th><th>说明</th></tr>
+<tr><td>GET</td><td class="endpoint"><code>/</code></td><td>Web 搜索界面(Google 风格)</td></tr>
+<tr><td>GET</td><td class="endpoint"><code>/api/search</code></td><td>搜索(支持模糊匹配)</td></tr>
+<tr><td>GET</td><td class="endpoint"><code>/api/suggest</code></td><td>搜索联想</td></tr>
+<tr><td>GET</td><td class="endpoint"><code>/api/status</code></td><td>引擎状态</td></tr>
+<tr><td>GET</td><td class="endpoint"><code>/api/stats</code></td><td>索引统计与站点列表</td></tr>
+<tr><td>GET</td><td class="endpoint"><code>/api/sitemap</code></td><td>站点地图</td></tr>
+<tr><td>GET</td><td class="endpoint"><code>/api/rebuild</code></td><td>重建索引</td></tr>
+<tr><td>GET</td><td class="endpoint"><code>/api/docs</code></td><td>本文档</td></tr>
+</table>
+
+<h2>搜索 <span class="tag">GET</span> <code>/api/search</code></h2>
+<h3>参数</h3>
+<table>
+<tr><th>参数</th><th>必填</th><th>说明</th></tr>
+<tr><td><code>q</code></td><td>是</td><td>搜索关键词(支持中文分词、编辑距离 &le; 2 模糊匹配)</td></tr>
+<tr><td><code>limit</code></td><td>否</td><td>返回条数,默认 10,最大 100</td></tr>
+<tr><td><code>ai</code></td><td>否</td><td><code>1</code> 或 <code>true</code> 时附加 AI 摘要(需配置 AI 接入)</td></tr>
+</table>
+<h3>响应示例</h3>
+<pre>{
+  "query": "智能家居",
+  "time_ms": 12,
+  "total": 3,
+  "ai_summary": "...(可选)",
+  "results": [
+    {
+      "title": "智能家居 - abc.com",
+      "url": "https://abc.com/",
+      "domain": "abc.com",
+      "description": "智能家居 相关资讯...",
+      "score": 9.0
+    }
+  ]
+}</pre>
+
+<h2>联想 <span class="tag">GET</span> <code>/api/suggest</code></h2>
+<h3>参数</h3>
+<table>
+<tr><th>参数</th><th>必填</th><th>说明</th></tr>
+<tr><td><code>q</code></td><td>是</td><td>输入前缀</td></tr>
+<tr><td><code>limit</code></td><td>否</td><td>返回条数,默认 10,最大 50</td></tr>
+</table>
+<h3>响应示例</h3>
+<pre>{
+  "query": "智",
+  "suggestions": ["智能家居", "人工智能", "智能制造"]
+}</pre>
+
+<h2>状态 <span class="tag">GET</span> <code>/api/status</code></h2>
+<pre>{
+  "status": "ok",
+  "name": "PILSEOCORE Local Search",
+  "version": "0.1.0",
+  "sites": 341,
+  "terms": 5123,
+  "blocks": 37,
+  "loaded_blocks": 3,
+  "cache_hits": 15,
+  "cache_misses": 8,
+  "cache_hit_rate": 0.65
+}</pre>
+
+<h2>索引统计 <span class="tag">GET</span> <code>/api/stats</code></h2>
+<p>返回全部被索引站点(域名/标题/URL)。</p>
+
+<h2>站点地图 <span class="tag">GET</span> <code>/api/sitemap?domain=abc.com</code></h2>
+<p>返回该域名的 sitemap URL 列表(索引器自动生成 <code>out/sites/&lt;域名&gt;/sitemap.xml</code>)。</p>
+
+<h2>重建索引 <span class="tag">GET</span> <code>/api/rebuild</code></h2>
+<p>重新扫描 <code>out/sites/</code> 提取标题/描述/关键词并重建倒排索引。</p>
+
+<h2>AI 接入</h2>
+<p>在 <code>config/engine.conf</code> 配置:</p>
+<pre>ai_enabled = true
+ai_endpoint = http://127.0.0.1:11434/v1/chat/completions
+ai_model = qwen3:8b
+# ai_api_key = 你的key(本地服务留空)</pre>
+<p>搜索时加 <code>&amp;ai=1</code> 即返回 AI 摘要(OpenAI 兼容,支持 Ollama/llama-server/vLLM 等)。</p>
+
+<h2>MCP 支持</h2>
+<p>启动 MCP Server(stdio):</p>
+<pre>pilseocore mcp</pre>
+<p>工具列表: <code>search</code> / <code>suggest</code> / <code>status</code> / <code>sitemap</code> / <code>rebuild</code></p>
+
+<h2>命令行</h2>
+<pre>pilseocore serve [--port 8891]   # 启动搜索服务(自动加载/重建索引)
+pilseocore index                 # 手动重建索引
+pilseocore search "关键词"        # CLI 搜索
+pilseocore mcp                   # MCP Server(stdio)</pre>
+
+<h2>热点缓存与分块查找</h2>
+<p><b>热点缓存</b>: 最近查询结果按 LRU 缓存(<code>hot_cache_size</code> 条,默认 1000,TTL 60 秒),相同查询直接命中。</p>
+<p><b>分块查找</b>: 倒排索引按词首字符分 36+1 块(<code>0-9 a-z other</code>)持久化,查询只路由并加载相关块,避免全量扫描。</p>
+</div>
+</body>
+</html>

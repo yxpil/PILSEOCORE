@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PILSEOCORE 本地搜索引擎</title>
+<style>
+  :root { --blue:#4285f4; --red:#ea4335; --yellow:#fbbc05; --green:#34a853; --gray:#5f6368; --line:#e0e0e0; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; background:#fff; color:#202124; }
+  a { text-decoration:none; }
+
+  /* 顶部导航(结果页) */
+  #topbar { display:none; align-items:center; gap:24px; padding:20px 32px 12px; }
+  #topbar .mini-logo { font-size:22px; font-weight:600; letter-spacing:-1px; cursor:pointer; white-space:nowrap; }
+  #topbar .searchbox-wrap { flex:1; max-width:620px; }
+  #topbar .sb { border-radius:24px; border:1px solid var(--line); padding:11px 20px; font-size:16px; outline:none; width:100%; }
+  #topbar .sb:focus, #topbar .sb:hover { box-shadow:0 1px 6px rgba(32,33,36,.28); border-color:transparent; }
+
+  /* 主页 */
+  #home { display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:70vh; padding:0 16px; }
+  #home .big-logo { font-size:64px; font-weight:600; letter-spacing:-4px; margin-bottom:32px; user-select:none; }
+  #home .sb { border-radius:28px; border:1px solid var(--line); padding:15px 24px; font-size:18px; outline:none; width:min(560px,90vw); box-shadow:none; }
+  #home .sb:hover, #home .sb:focus { box-shadow:0 1px 6px rgba(32,33,36,.28); }
+  #home .btns { display:flex; gap:12px; margin-top:24px; }
+  #home .btn { background:#f8f9fa; border:1px solid #f8f9fa; border-radius:6px; padding:10px 18px; font-size:14px; color:#3c4043; cursor:pointer; }
+  #home .btn:hover { border-color:var(--line); box-shadow:0 1px 2px rgba(0,0,0,.1); }
+
+  /* 联想下拉 */
+  #suggest { position:relative; width:min(560px,90vw); margin-top:0; }
+  #suggest .panel { position:absolute; top:6px; left:0; right:0; background:#fff; border-radius:16px; box-shadow:0 4px 20px rgba(32,33,36,.28); overflow:hidden; z-index:10; }
+  #suggest .item { padding:10px 22px; font-size:15px; cursor:pointer; display:flex; align-items:center; gap:10px; }
+  #suggest .item:hover, #suggest .item.active { background:#f1f3f4; }
+  #suggest .item .q { color:#202124; }
+  #suggest .item .meta { color:var(--gray); font-size:13px; margin-left:auto; }
+
+  /* 结果区 */
+  #results { max-width:640px; margin:8px auto 0; padding:0 16px 64px; }
+  .stat { color:var(--gray); font-size:13px; margin:0 0 18px; }
+  .result { margin-bottom:26px; }
+  .result .url { color:var(--green); font-size:13px; margin-bottom:2px; }
+  .result .title { font-size:20px; color:#1a0dab; }
+  .result .title:hover { text-decoration:underline; }
+  .result .desc { color:#4d5156; font-size:14px; line-height:1.58; margin-top:4px; }
+  .result .kw { color:#70757a; font-size:13px; margin-top:2px; }
+  .ai-box { background:#f8f9fa; border-radius:12px; padding:16px 20px; margin-bottom:24px; border:1px solid var(--line); }
+  .ai-box .ai-label { font-size:12px; color:var(--gray); text-transform:uppercase; letter-spacing:1px; margin-bottom:8px; }
+  .ai-box .ai-text { font-size:14px; line-height:1.7; color:#202124; white-space:pre-wrap; }
+  .ai-box .ai-err { color:var(--red); font-size:13px; margin-top:6px; }
+
+  .empty { color:var(--gray); text-align:center; margin-top:80px; font-size:15px; }
+  .empty .big { font-size:40px; margin-bottom:12px; color:#dadce0; }
+
+  /* 页脚 */
+  footer { color:var(--gray); font-size:12px; text-align:center; padding:24px; }
+</style>
+</head>
+<body>
+
+<!-- 顶部导航 -->
+<div id="topbar">
+  <div class="mini-logo" onclick="goHome()"><span class="lc">P</span><span class="lc" style="color:var(--red)">I</span><span class="lc" style="color:var(--yellow)">L</span><span class="lc" style="color:var(--blue)">S</span><span class="lc" style="color:var(--green)">E</span><span class="lc" style="color:var(--red)">O</span><span class="lc" style="color:var(--yellow)">C</span><span class="lc" style="color:var(--blue)">O</span><span class="lc" style="color:var(--green)">R</span><span class="lc" style="color:var(--red)">E</span></div>
+  <div class="searchbox-wrap"><input class="sb" id="topq" autocomplete="off" placeholder="搜索本地站点..." onkeydown="if(event.key==='Enter')doSearch(this.value)" oninput="debouncedSuggest(this.value,'top')"></div>
+</div>
+
+<!-- 主页 -->
+<div id="home">
+  <div class="big-logo">
+    <span style="color:var(--blue)">P</span><span style="color:var(--red)">I</span><span style="color:var(--yellow)">L</span><span style="color:var(--blue)">S</span><span style="color:var(--green)">E</span><span style="color:var(--red)">O</span><span style="color:var(--yellow)">C</span><span style="color:var(--blue)">O</span><span style="color:var(--green)">R</span><span style="color:var(--red)">E</span>
+  </div>
+  <div id="suggest">
+    <input class="sb" id="q" autocomplete="off" placeholder="搜索本地站点..." onkeydown="if(event.key==='Enter')doSearch(this.value)" oninput="debouncedSuggest(this.value,'home')">
+    <div class="panel" id="panel" style="display:none"></div>
+  </div>
+  <div class="btns">
+    <button class="btn" onclick="doSearch(document.getElementById('q').value)">搜索</button>
+    <button class="btn" onclick="doSearch(document.getElementById('q').value, true)">AI 搜索</button>
+  </div>
+</div>
+
+<!-- 结果 -->
+<div id="results" style="display:none"></div>
+<footer id="foot" style="display:none">PILSEOCORE 本地搜索引擎 · 域名穷举 · 自动建站 · 本地索引</footer>
+
+<script>
+var home = document.getElementById('home');
+var topbar = document.getElementById('topbar');
+var resultsBox = document.getElementById('results');
+var foot = document.getElementById('foot');
+var suggestTimer = null;
+
+function goHome() {
+  home.style.display = 'flex';
+  topbar.style.display = 'none';
+  resultsBox.style.display = 'none';
+  resultsBox.innerHTML = '';
+  foot.style.display = 'none';
+  document.getElementById('q').value = '';
+  history.pushState({}, '', '/');
+}
+
+function doSearch(q, useAi) {
+  if (!q || !q.trim()) return;
+  var url = '/api/search?q=' + encodeURIComponent(q.trim()) + '&limit=10';
+  if (useAi) url += '&ai=1';
+  home.style.display = 'none';
+  topbar.style.display = 'flex';
+  document.getElementById('topq').value = q;
+  hidePanel();
+  fetch(url).then(function(r){ return r.json(); }).then(function(d){
+    render(d, q);
+    history.pushState({}, '', '/search?q=' + encodeURIComponent(q));
+  }).catch(function(e){
+    resultsBox.innerHTML = '<div class="empty"><div class="big">!</div>请求失败:' + e + '</div>';
+    resultsBox.style.display = 'block';
+    foot.style.display = 'block';
+  });
+}
+
+function render(d, q) {
+  var html = '';
+  html += '<div class="stat">' + (d.ai_summary ? 'AI 摘要已生成' : '') + (d.total ? '' : '') + '找到 ' + d.total + ' 条结果 (' + d.time_ms + ' 毫秒)</div>';
+  if (d.ai_summary) {
+    html += '<div class="ai-box"><div class="ai-label">AI 智能摘要</div><div class="ai-text">' + esc(d.ai_summary) + '</div></div>';
+  }
+  if (d.ai_error) {
+    html += '<div class="ai-box"><div class="ai-label">AI</div><div class="ai-err">' + esc(d.ai_error) + '</div></div>';
+  }
+  if (!d.results || !d.results.length) {
+    html += '<div class="empty"><div class="big"> </div>没有找到与 "' + esc(q) + '" 相关的结果<br><br>试试其他关键词,或先运行引擎穷举建站</div>';
+  }
+  d.results.forEach(function(r){
+    html += '<div class="result">';
+    html += '<div class="url">' + esc(r.url) + '</div>';
+    html += '<a class="title" href="' + esc(r.url) + '" target="_blank">' + esc(r.title) + '</a>';
+    html += '<div class="desc">' + esc(r.description || '') + '</div>';
+    if (r.domain) html += '<div class="kw">' + esc(r.domain) + '</div>';
+    html += '</div>';
+  });
+  resultsBox.innerHTML = html;
+  resultsBox.style.display = 'block';
+  foot.style.display = 'block';
+}
+
+function debouncedSuggest(q, where) {
+  clearTimeout(suggestTimer);
+  if (!q || !q.trim()) { hidePanel(); return; }
+  suggestTimer = setTimeout(function(){ fetchSuggest(q.trim(), where); }, 120);
+}
+
+function fetchSuggest(q, where) {
+  fetch('/api/suggest?q=' + encodeURIComponent(q) + '&limit=8').then(function(r){ return r.json(); }).then(function(d){
+    var list = d.suggestions || [];
+    if (!list.length) { hidePanel(); return; }
+    var panel = document.getElementById('panel');
+    panel.innerHTML = '';
+    list.forEach(function(s){
+      var item = document.createElement('div');
+      item.className = 'item';
+      item.innerHTML = '<span class="q">' + esc(s) + '</span>';
+      item.onclick = function(){ doSearch(s); };
+      panel.appendChild(item);
+    });
+    panel.style.display = 'block';
+  }).catch(function(){ hidePanel(); });
+}
+
+function hidePanel() { document.getElementById('panel').style.display = 'none'; }
+function esc(s) { return String(s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+
+// 深链: /search?q=...
+(function(){
+  var p = location.pathname;
+  if (p === '/search') {
+    var params = new URLSearchParams(location.search);
+    var q = params.get('q');
+    if (q) doSearch(q);
+    else goHome();
+  }
+})();
+</script>
+</body>
+</html>
