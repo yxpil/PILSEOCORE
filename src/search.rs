@@ -224,9 +224,22 @@ impl SearchEngine {
         } else {
             core.clone()
         };
-        // 查询词在语料中无有效匹配(全部 token 均为低信息残片)→ 无结果
+        // 查询词在语料中无有效匹配(全部 token 均为低信息残片)
+        // => 未登录词(语料低频,如"安卓"不在 BPE 词表):退化为全文档短语扫描,
+        //    防止"明明有收录却搜不到";结果继续走相关度评分与折叠
         if terms.is_empty() {
-            return (0, Vec::new());
+            for (doc_id, doc) in idx.docs.iter().enumerate() {
+                if self.blacklist.is_blocked(&doc.domain) {
+                    continue;
+                }
+                let text = format!("{} {} {} {}", doc.title, doc.description, doc.domain, doc.keywords.join(" ")).to_lowercase();
+                if text.contains(&phrase) {
+                    candidates.insert(doc_id);
+                }
+            }
+            if candidates.is_empty() {
+                return (0, Vec::new());
+            }
         }
         for term in &terms {
             let chunk = crate::index::chunk_of(term);
@@ -476,6 +489,22 @@ mod tests {
         let (total2, hits2) = engine.search("智能家居", 1, 10);
         assert!(total2 >= 1, "语料内查询应正常命中, total={}", total2);
         assert!(!hits2.is_empty());
+    }
+
+    #[test]
+    fn out_of_vocab_but_in_docs_matches() {
+        // "安卓" 未登录 BPE 词表(语料低频),但索引文档确实包含该词
+        // => 必须能搜到(短语扫描兜底),不能"明明有收录却搜不到"
+        let engine = fake_index(vec![
+            doc("lbesec.com", "LBE TECH - 全球安卓技术先锋", "移动互联网安全", &["安卓"]),
+            doc("abc.com", "智能家居 - abc.com", "智能家居 相关资讯", &["智能家居"]),
+        ]);
+        let (total, hits) = engine.search("安卓", 1, 10);
+        assert_eq!(total, 1, "含'安卓'的文档应命中,实际 total={}", total);
+        assert_eq!(hits[0].domain, "lbesec.com");
+        // 无关查询仍返回空
+        let (total2, _) = engine.search("哔哩哔哩", 1, 10);
+        assert_eq!(total2, 0, "语料外查询应返回空");
     }
 
     #[test]
