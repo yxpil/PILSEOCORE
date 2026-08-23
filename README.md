@@ -47,6 +47,42 @@ pilseocore search "智能家居"                # CLI 搜索
 pilseocore mcp                              # MCP Server(stdio)
 ```
 
+### 权限控制(管理员 / 用户)
+
+服务区分两种角色:
+
+| 角色 | 认证 | 权限 |
+|---|---|---|
+| 普通用户 | 无需认证 | 搜索、联想、状态、站点地图、API 文档、Web UI(只读) |
+| 管理员 | 请求头 `Authorization: Bearer <admin_token>` | 全部 + 触发穷举遍历、配置后缀/DNS 列表、重建索引 |
+
+在 `config/engine.conf` 配置 `admin_token`(默认示例 `pilseo_admin_2026`,请修改);留空则管理功能整体禁用,所有管理接口返回 403。
+
+管理接口(Web UI 点"管理"登录后可直接操作):
+
+```bash
+# 触发穷举遍历(后台运行,完成后自动重建索引)
+curl -X POST http://127.0.0.1:8891/api/admin/scan \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"max_len":2,"workers":64}'
+
+# 查看扫描状态
+curl http://127.0.0.1:8891/api/admin/scan-status -H "Authorization: Bearer <token>"
+
+# 保存域名后缀列表(空格分隔,按此顺序遍历)
+curl -X POST http://127.0.0.1:8891/api/admin/config/tld \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"content":"com net org io cn"}'
+
+# 保存 DNS 列表(每行一个)
+curl -X POST http://127.0.0.1:8891/api/admin/config/dns \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"content":"8.8.8.8\n223.5.5.5"}'
+
+# 重建索引
+curl -X POST http://127.0.0.1:8891/api/admin/rebuild -H "Authorization: Bearer <token>"
+```
+
 ### 配置(config/engine.conf)
 
 | 键 | 说明 | 默认 |
@@ -65,6 +101,7 @@ pilseocore mcp                              # MCP Server(stdio)
 | `hot_cache_size` / `hot_cache_ttl` | 热点缓存容量/TTL | `1000` / `60` |
 | `ai_enabled` | AI 摘要开关 | `false` |
 | `ai_endpoint` / `ai_model` | AI 端点/模型 | 本地 llama-server |
+| `admin_token` | 管理员令牌(留空=管理禁用) | `pilseo_admin_2026` |
 
 ### 输出
 

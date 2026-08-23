@@ -16,6 +16,8 @@
   #topbar .searchbox-wrap { flex:1; max-width:620px; }
   #topbar .sb { border-radius:24px; border:1px solid var(--line); padding:11px 20px; font-size:16px; outline:none; width:100%; }
   #topbar .sb:focus, #topbar .sb:hover { box-shadow:0 1px 6px rgba(32,33,36,.28); border-color:transparent; }
+  .admin-link { color:var(--gray); font-size:13px; cursor:pointer; white-space:nowrap; }
+  .admin-link:hover { color:var(--blue); }
 
   /* 主页 */
   #home { display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:70vh; padding:0 16px; }
@@ -25,14 +27,14 @@
   #home .btns { display:flex; gap:12px; margin-top:24px; }
   #home .btn { background:#f8f9fa; border:1px solid #f8f9fa; border-radius:6px; padding:10px 18px; font-size:14px; color:#3c4043; cursor:pointer; }
   #home .btn:hover { border-color:var(--line); box-shadow:0 1px 2px rgba(0,0,0,.1); }
+  #home .home-admin { margin-top:40px; }
 
   /* 联想下拉 */
-  #suggest { position:relative; width:min(560px,90vw); margin-top:0; }
+  #suggest { position:relative; width:min(560px,90vw); }
   #suggest .panel { position:absolute; top:6px; left:0; right:0; background:#fff; border-radius:16px; box-shadow:0 4px 20px rgba(32,33,36,.28); overflow:hidden; z-index:10; }
   #suggest .item { padding:10px 22px; font-size:15px; cursor:pointer; display:flex; align-items:center; gap:10px; }
   #suggest .item:hover, #suggest .item.active { background:#f1f3f4; }
   #suggest .item .q { color:#202124; }
-  #suggest .item .meta { color:var(--gray); font-size:13px; margin-left:auto; }
 
   /* 结果区 */
   #results { max-width:640px; margin:8px auto 0; padding:0 16px 64px; }
@@ -49,9 +51,33 @@
   .ai-box .ai-err { color:var(--red); font-size:13px; margin-top:6px; }
 
   .empty { color:var(--gray); text-align:center; margin-top:80px; font-size:15px; }
-  .empty .big { font-size:40px; margin-bottom:12px; color:#dadce0; }
 
-  /* 页脚 */
+  /* 模态框 */
+  .modal-mask { display:none; position:fixed; inset:0; background:rgba(32,33,36,.5); z-index:100; }
+  .modal { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:#fff; border-radius:16px; box-shadow:0 8px 40px rgba(0,0,0,.3); padding:28px 32px; width:min(680px,92vw); max-height:86vh; overflow-y:auto; }
+  .modal h2 { font-size:20px; margin-bottom:4px; }
+  .modal .sub { color:var(--gray); font-size:13px; margin-bottom:20px; }
+  .modal .close { float:right; cursor:pointer; color:var(--gray); font-size:20px; }
+  .modal .close:hover { color:#202124; }
+  .modal label { display:block; font-size:13px; color:var(--gray); margin:14px 0 6px; }
+  .modal input[type=text], .modal input[type=password], .modal input[type=number], .modal textarea {
+    width:100%; border:1px solid var(--line); border-radius:8px; padding:10px 14px; font-size:14px; outline:none; font-family:inherit;
+  }
+  .modal input:focus, .modal textarea:focus { border-color:var(--blue); box-shadow:0 0 0 2px rgba(66,133,244,.15); }
+  .modal textarea { min-height:120px; font-family:Consolas,monospace; font-size:13px; resize:vertical; }
+  .modal .row { display:flex; gap:12px; }
+  .modal .row > div { flex:1; }
+  .modal .btn { background:#1a73e8; color:#fff; border:none; border-radius:8px; padding:10px 22px; font-size:14px; cursor:pointer; margin-top:18px; }
+  .modal .btn:hover { background:#1765cc; }
+  .modal .btn.secondary { background:#f8f9fa; color:#3c4043; border:1px solid var(--line); }
+  .modal .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .modal .msg { font-size:13px; margin-top:10px; min-height:18px; }
+  .modal .msg.ok { color:var(--green); }
+  .modal .msg.err { color:var(--red); }
+  .modal .msg.warn { color:#b06000; }
+  .scan-state { background:#f8f9fa; border:1px solid var(--line); border-radius:8px; padding:12px 16px; font-size:13px; margin-top:12px; display:none; }
+  .scan-state b { color:var(--blue); }
+
   footer { color:var(--gray); font-size:12px; text-align:center; padding:24px; }
 </style>
 </head>
@@ -59,8 +85,9 @@
 
 <!-- 顶部导航 -->
 <div id="topbar">
-  <div class="mini-logo" onclick="goHome()"><span class="lc">P</span><span class="lc" style="color:var(--red)">I</span><span class="lc" style="color:var(--yellow)">L</span><span class="lc" style="color:var(--blue)">S</span><span class="lc" style="color:var(--green)">E</span><span class="lc" style="color:var(--red)">O</span><span class="lc" style="color:var(--yellow)">C</span><span class="lc" style="color:var(--blue)">O</span><span class="lc" style="color:var(--green)">R</span><span class="lc" style="color:var(--red)">E</span></div>
-  <div class="searchbox-wrap"><input class="sb" id="topq" autocomplete="off" placeholder="搜索本地站点..." onkeydown="if(event.key==='Enter')doSearch(this.value)" oninput="debouncedSuggest(this.value,'top')"></div>
+  <div class="mini-logo" onclick="goHome()"><span style="color:var(--blue)">P</span><span style="color:var(--red)">I</span><span style="color:var(--yellow)">L</span><span style="color:var(--blue)">S</span><span style="color:var(--green)">E</span><span style="color:var(--red)">O</span><span style="color:var(--yellow)">C</span><span style="color:var(--blue)">O</span><span style="color:var(--green)">R</span><span style="color:var(--red)">E</span></div>
+  <div class="searchbox-wrap"><input class="sb" id="topq" autocomplete="off" placeholder="搜索本地站点..." onkeydown="if(event.key==='Enter')doSearch(this.value)" oninput="debouncedSuggest(this.value)"></div>
+  <span class="admin-link" onclick="openAdmin()">管理</span>
 </div>
 
 <!-- 主页 -->
@@ -69,18 +96,53 @@
     <span style="color:var(--blue)">P</span><span style="color:var(--red)">I</span><span style="color:var(--yellow)">L</span><span style="color:var(--blue)">S</span><span style="color:var(--green)">E</span><span style="color:var(--red)">O</span><span style="color:var(--yellow)">C</span><span style="color:var(--blue)">O</span><span style="color:var(--green)">R</span><span style="color:var(--red)">E</span>
   </div>
   <div id="suggest">
-    <input class="sb" id="q" autocomplete="off" placeholder="搜索本地站点..." onkeydown="if(event.key==='Enter')doSearch(this.value)" oninput="debouncedSuggest(this.value,'home')">
+    <input class="sb" id="q" autocomplete="off" placeholder="搜索本地站点..." onkeydown="if(event.key==='Enter')doSearch(this.value)" oninput="debouncedSuggest(this.value)">
     <div class="panel" id="panel" style="display:none"></div>
   </div>
   <div class="btns">
     <button class="btn" onclick="doSearch(document.getElementById('q').value)">搜索</button>
     <button class="btn" onclick="doSearch(document.getElementById('q').value, true)">AI 搜索</button>
   </div>
+  <div class="home-admin"><span class="admin-link" onclick="openAdmin()">管理员入口</span></div>
 </div>
 
 <!-- 结果 -->
 <div id="results" style="display:none"></div>
 <footer id="foot" style="display:none">PILSEOCORE 本地搜索引擎 · 域名穷举 · 自动建站 · 本地索引</footer>
+
+<!-- 管理员模态框 -->
+<div class="modal-mask" id="adminMask" onclick="if(event.target===this)closeAdmin()">
+  <div class="modal">
+    <span class="close" onclick="closeAdmin()">x</span>
+    <h2>管理员控制台</h2>
+    <div class="sub">普通用户仅可搜索;管理员可触发穷举遍历、配置域名后缀与 DNS</div>
+    <div id="loginBox">
+      <label>管理员令牌</label>
+      <input type="password" id="adminToken" placeholder="输入 admin_token" onkeydown="if(event.key==='Enter')adminLogin()">
+      <div class="msg" id="loginMsg"></div>
+      <button class="btn" onclick="adminLogin()">登录</button>
+    </div>
+    <div id="panelBox" style="display:none">
+      <label>穷举遍历(从 1 位穷举到指定位数)</label>
+      <div class="row">
+        <div><label style="margin-top:0">最大位数</label><input type="number" id="scanMaxLen" value="2" min="1" max="6"></div>
+        <div><label style="margin-top:0">并发数</label><input type="number" id="scanWorkers" value="64" min="1" max="512"></div>
+      </div>
+      <button class="btn" id="scanBtn" onclick="startScan()">开始穷举遍历</button>
+      <button class="btn secondary" onclick="rebuildIndex()">重建索引</button>
+      <div class="scan-state" id="scanState"></div>
+
+      <label>域名后缀列表(空格分隔,按此顺序遍历)</label>
+      <textarea id="tldEdit"></textarea>
+      <button class="btn secondary" onclick="saveConfig('tld')">保存后缀列表</button>
+
+      <label>DNS 服务器列表(每行一个,随机负载均衡)</label>
+      <textarea id="dnsEdit"></textarea>
+      <button class="btn secondary" onclick="saveConfig('dns')">保存 DNS 列表</button>
+      <div class="msg" id="adminMsg"></div>
+    </div>
+  </div>
+</div>
 
 <script>
 var home = document.getElementById('home');
@@ -88,6 +150,7 @@ var topbar = document.getElementById('topbar');
 var resultsBox = document.getElementById('results');
 var foot = document.getElementById('foot');
 var suggestTimer = null;
+var scanPoll = null;
 
 function goHome() {
   home.style.display = 'flex';
@@ -111,7 +174,7 @@ function doSearch(q, useAi) {
     render(d, q);
     history.pushState({}, '', '/search?q=' + encodeURIComponent(q));
   }).catch(function(e){
-    resultsBox.innerHTML = '<div class="empty"><div class="big">!</div>请求失败:' + e + '</div>';
+    resultsBox.innerHTML = '<div class="empty">请求失败:' + e + '</div>';
     resultsBox.style.display = 'block';
     foot.style.display = 'block';
   });
@@ -119,7 +182,7 @@ function doSearch(q, useAi) {
 
 function render(d, q) {
   var html = '';
-  html += '<div class="stat">' + (d.ai_summary ? 'AI 摘要已生成' : '') + (d.total ? '' : '') + '找到 ' + d.total + ' 条结果 (' + d.time_ms + ' 毫秒)</div>';
+  html += '<div class="stat">' + (d.ai_summary ? 'AI 摘要已生成 · ' : '') + '找到 ' + d.total + ' 条结果 (' + d.time_ms + ' 毫秒)</div>';
   if (d.ai_summary) {
     html += '<div class="ai-box"><div class="ai-label">AI 智能摘要</div><div class="ai-text">' + esc(d.ai_summary) + '</div></div>';
   }
@@ -127,14 +190,13 @@ function render(d, q) {
     html += '<div class="ai-box"><div class="ai-label">AI</div><div class="ai-err">' + esc(d.ai_error) + '</div></div>';
   }
   if (!d.results || !d.results.length) {
-    html += '<div class="empty"><div class="big"> </div>没有找到与 "' + esc(q) + '" 相关的结果<br><br>试试其他关键词,或先运行引擎穷举建站</div>';
+    html += '<div class="empty">没有找到与 "' + esc(q) + '" 相关的结果</div>';
   }
   d.results.forEach(function(r){
     html += '<div class="result">';
     html += '<div class="url">' + esc(r.url) + '</div>';
     html += '<a class="title" href="' + esc(r.url) + '" target="_blank">' + esc(r.title) + '</a>';
     html += '<div class="desc">' + esc(r.description || '') + '</div>';
-    if (r.domain) html += '<div class="kw">' + esc(r.domain) + '</div>';
     html += '</div>';
   });
   resultsBox.innerHTML = html;
@@ -142,13 +204,13 @@ function render(d, q) {
   foot.style.display = 'block';
 }
 
-function debouncedSuggest(q, where) {
+function debouncedSuggest(q) {
   clearTimeout(suggestTimer);
   if (!q || !q.trim()) { hidePanel(); return; }
-  suggestTimer = setTimeout(function(){ fetchSuggest(q.trim(), where); }, 120);
+  suggestTimer = setTimeout(function(){ fetchSuggest(q.trim()); }, 120);
 }
 
-function fetchSuggest(q, where) {
+function fetchSuggest(q) {
   fetch('/api/suggest?q=' + encodeURIComponent(q) + '&limit=8').then(function(r){ return r.json(); }).then(function(d){
     var list = d.suggestions || [];
     if (!list.length) { hidePanel(); return; }
@@ -168,12 +230,130 @@ function fetchSuggest(q, where) {
 function hidePanel() { document.getElementById('panel').style.display = 'none'; }
 function esc(s) { return String(s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
 
-// 深链: /search?q=...
+/* ============ 管理员控制台 ============ */
+function getToken() { return localStorage.getItem('pilseo_admin_token') || ''; }
+function adminFetch(path, opts) {
+  opts = opts || {};
+  opts.headers = opts.headers || {};
+  if (getToken()) opts.headers['Authorization'] = 'Bearer ' + getToken();
+  return fetch(path, opts);
+}
+
+function openAdmin() {
+  document.getElementById('adminMask').style.display = 'block';
+  if (getToken()) { adminLogin(); }
+}
+
+function closeAdmin() {
+  document.getElementById('adminMask').style.display = 'none';
+  if (scanPoll) { clearInterval(scanPoll); scanPoll = null; }
+}
+
+function adminLogin() {
+  var token = document.getElementById('adminToken').value.trim();
+  if (!token) token = getToken();
+  if (!token) { setMsg('loginMsg', '请输入管理员令牌', 'err'); return; }
+  localStorage.setItem('pilseo_admin_token', token);
+  adminFetch('/api/admin/status').then(function(r){ return r.json().then(function(d){ return {status:r.status, d:d}; }); }).then(function(res){
+    if (res.status === 200) {
+      document.getElementById('loginBox').style.display = 'none';
+      document.getElementById('panelBox').style.display = 'block';
+      setMsg('adminMsg', '管理员已验证', 'ok');
+      loadConfigs();
+      pollScan();
+      scanPoll = setInterval(pollScan, 3000);
+    } else {
+      localStorage.removeItem('pilseo_admin_token');
+      setMsg('loginMsg', '令牌无效: ' + (res.d.error || res.status), 'err');
+    }
+  }).catch(function(e){
+    setMsg('loginMsg', '请求失败: ' + e, 'err');
+  });
+}
+
+function setMsg(id, text, cls) {
+  var el = document.getElementById(id);
+  el.textContent = text;
+  el.className = 'msg' + (cls ? ' ' + cls : '');
+}
+
+function loadConfigs() {
+  adminFetch('/api/admin/config').then(function(r){ return r.json(); }).then(function(d){
+    document.getElementById('tldEdit').value = d.tld || '';
+    document.getElementById('dnsEdit').value = d.dns || '';
+  });
+}
+
+function saveConfig(kind) {
+  var el = document.getElementById(kind === 'tld' ? 'tldEdit' : 'dnsEdit');
+  var content = el.value.trim();
+  if (!content) { setMsg('adminMsg', '内容不能为空', 'err'); return; }
+  adminFetch('/api/admin/config/' + kind, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content: content })
+  }).then(function(r){ return r.json().then(function(d){ return {status:r.status, d:d}; }); }).then(function(res){
+    if (res.status === 200) {
+      setMsg('adminMsg', (kind === 'tld' ? '后缀列表' : 'DNS 列表') + '已保存(' + res.d.entries + ' 条),下次穷举生效', 'ok');
+    } else {
+      setMsg('adminMsg', '保存失败: ' + (res.d.error || res.status), 'err');
+    }
+  }).catch(function(e){ setMsg('adminMsg', '保存失败: ' + e, 'err'); });
+}
+
+function startScan() {
+  var maxLen = parseInt(document.getElementById('scanMaxLen').value, 10) || 2;
+  var workers = parseInt(document.getElementById('scanWorkers').value, 10) || 64;
+  if (maxLen < 1 || maxLen > 6) { setMsg('adminMsg', '最大位数范围 1-6', 'err'); return; }
+  setMsg('adminMsg', '正在启动穷举遍历(位数 ' + maxLen + ',并发 ' + workers + ')...', 'warn');
+  adminFetch('/api/admin/scan', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ max_len: maxLen, workers: workers })
+  }).then(function(r){ return r.json().then(function(d){ return {status:r.status, d:d}; }); }).then(function(res){
+    if (res.status === 202) {
+      setMsg('adminMsg', '穷举已启动,后台运行中(完成后自动重建索引)', 'ok');
+      pollScan();
+      if (!scanPoll) scanPoll = setInterval(pollScan, 3000);
+    } else {
+      setMsg('adminMsg', '启动失败: ' + (res.d.error || res.status), 'err');
+    }
+  }).catch(function(e){ setMsg('adminMsg', '启动失败: ' + e, 'err'); });
+}
+
+function pollScan() {
+  adminFetch('/api/admin/scan-status').then(function(r){ return r.json(); }).then(function(s){
+    var el = document.getElementById('scanState');
+    el.style.display = 'block';
+    var btn = document.getElementById('scanBtn');
+    if (s.running) {
+      btn.disabled = true;
+      el.innerHTML = '<b>扫描中...</b> 已处理 ' + s.total + ' 个域名 · 可用=' + s.available + ' · 已注册=' + s.registered + ' · 失败=' + s.errors + ' · 建站=' + s.sites;
+    } else {
+      btn.disabled = false;
+      if (s.finished) {
+        var line = '<b>上次扫描完成</b> 总数=' + s.total + ' · 可用=' + s.available + ' · 已注册=' + s.registered + ' · 失败=' + s.errors + ' · 建站=' + s.sites + ' · 耗时=' + s.elapsed_secs + 's';
+        if (s.error) line += '<br>错误: ' + esc(s.error);
+        el.innerHTML = line;
+      } else {
+        el.innerHTML = '暂无扫描记录';
+      }
+    }
+  }).catch(function(){});
+}
+
+function rebuildIndex() {
+  setMsg('adminMsg', '正在重建索引...', 'warn');
+  adminFetch('/api/admin/rebuild', { method: 'POST' }).then(function(r){ return r.json(); }).then(function(d){
+    if (d.status === 'ok') setMsg('adminMsg', '索引重建完成,共 ' + d.sites + ' 个站点', 'ok');
+    else setMsg('adminMsg', '重建失败: ' + (d.message || d.status), 'err');
+  }).catch(function(e){ setMsg('adminMsg', '重建失败: ' + e, 'err'); });
+}
+
 (function(){
   var p = location.pathname;
   if (p === '/search') {
-    var params = new URLSearchParams(location.search);
-    var q = params.get('q');
+    var q = new URLSearchParams(location.search).get('q');
     if (q) doSearch(q);
     else goHome();
   }

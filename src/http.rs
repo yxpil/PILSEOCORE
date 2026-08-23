@@ -23,6 +23,11 @@ impl Request {
     pub fn param(&self, key: &str) -> Option<&str> {
         self.query.get(key).map(|s| s.as_str())
     }
+
+    /// 请求头(小写键)
+    pub fn header(&self, key: &str) -> Option<&str> {
+        self.headers.get(&key.to_lowercase()).map(|s| s.as_str())
+    }
 }
 
 #[derive(Clone, Debug)]

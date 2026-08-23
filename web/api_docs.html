@@ -26,6 +26,38 @@
 <h1>PILSEOCORE 本地搜索引擎 API 文档</h1>
 <p>版本 <code>v0.1.0</code> · 所有接口返回 JSON(UTF-8)· 支持 CORS</p>
 
+<h2>权限控制</h2>
+<p>服务区分两种角色:</p>
+<table>
+<tr><th>角色</th><th>认证</th><th>权限</th></tr>
+<tr><td>普通用户</td><td>无需认证</td><td>搜索、联想、状态、站点地图、文档、Web UI</td></tr>
+<tr><td>管理员</td><td>请求头 <code>Authorization: Bearer &lt;admin_token&gt;</code></td><td>全部 + 触发穷举遍历、配置后缀/DNS、重建索引</td></tr>
+</table>
+<p>在 <code>config/engine.conf</code> 配置 <code>admin_token</code>;留空则管理功能整体禁用(管理接口返回 403)。</p>
+
+<h2>管理员接口</h2>
+<table>
+<tr><th>方法</th><th>路径</th><th>说明</th></tr>
+<tr><td>GET</td><td><code>/api/admin/status</code></td><td>扫描状态 + 当前后缀/DNS 配置概要</td></tr>
+<tr><td>GET</td><td><code>/api/admin/scan-status</code></td><td>穷举扫描状态(运行中/完成统计)</td></tr>
+<tr><td>POST</td><td><code>/api/admin/scan</code></td><td>触发穷举遍历</td></tr>
+<tr><td>GET</td><td><code>/api/admin/config</code></td><td>读取 tld.list / dns.list 全文</td></tr>
+<tr><td>POST</td><td><code>/api/admin/config/tld</code></td><td>保存域名后缀列表(空格分隔)</td></tr>
+<tr><td>POST</td><td><code>/api/admin/config/dns</code></td><td>保存 DNS 列表(每行一个)</td></tr>
+<tr><td>POST</td><td><code>/api/admin/rebuild</code></td><td>重建索引(扫描 out/sites)</td></tr>
+</table>
+
+<h3>触发穷举 <span class="tag">POST</span> <code>/api/admin/scan</code></h3>
+<h3>请求体</h3>
+<pre>{
+  "max_len": 2,       // 穷举到的最大位数(必填,1-6)
+  "min_len": 1,       // 起始位数(可选,默认 1)
+  "workers": 64       // 并发数(可选,1-512)
+}</pre>
+<h3>响应(202)</h3>
+<pre>{"status":"scan_started","max_len":2}</pre>
+<p>扫描在后台运行,完成后自动重建索引;通过 <code>/api/admin/scan-status</code> 轮询进度。</p>
+
 <h2>基础信息</h2>
 <p>服务地址: <code>http://127.0.0.1:8891</code>(可在 <code>config/engine.conf</code> 修改 <code>server_port</code>)</p>
 

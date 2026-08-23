@@ -1,16 +1,28 @@
-//! API 服务:HTTP 路由 + 静态 Web UI + API 文档
+//! API 服务:HTTP 路由 + 权限控制 + Web UI + API 文档
+//!
+//! 角色:
+//!   普通用户(无令牌)      -> 只读:搜索/联想/状态/站点地图/文档/UI
+//!   管理员(Bearer token)  -> 全部 + 触发穷举遍历/配置后缀与DNS/重建索引
 //!
 //! 路由:
-//!   GET /                  Web UI(Google 风格)
-//!   GET /api/status        引擎状态
-//!   GET /api/stats         索引统计
-//!   GET /api/search?q=&limit=&ai=  搜索(可选 AI 摘要)
-//!   GET /api/suggest?q=    联想建议
-//!   GET /api/sitemap?domain=  站点地图
-//!   GET /api/rebuild       重建索引
-//!   GET /api/docs          API 文档
+//!   GET  /                          Web UI(Google 风格)
+//!   GET  /api/docs                  API 文档
+//!   GET  /api/status                引擎状态(公开)
+//!   GET  /api/stats                 索引统计(公开)
+//!   GET  /api/search                搜索(公开)
+//!   GET  /api/suggest               联想(公开)
+//!   GET  /api/sitemap               站点地图(公开)
+//!   ---- 以下需管理员 ----
+//!   GET  /api/admin/status          扫描状态 + 配置概要
+//!   GET  /api/admin/scan-status     扫描状态
+//!   POST /api/admin/scan            触发穷举遍历
+//!   GET  /api/admin/config          读取后缀/DNS 配置
+//!   POST /api/admin/config/tld      保存后缀列表
+//!   POST /api/admin/config/dns      保存 DNS 列表
+//!   POST /api/admin/rebuild         重建索引
 
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::ai::AiConfig;
@@ -21,27 +33,117 @@ use crate::search::SearchEngine;
 const WEB_UI: &str = include_str!("../web/index.html");
 const API_DOCS: &str = include_str!("../web/api_docs.html");
 
-pub fn handle(engine: &Arc<SearchEngine>, ai: &AiConfig, req: &Request) -> Response {
+/// 扫描任务状态(跨线程共享)
+#[derive(Clone, Debug)]
+pub struct ScanState {
+    pub running: bool,
+    pub finished: bool,
+    pub error: Option<String>,
+    pub started_ts: u64,
+    pub finished_ts: u64,
+    pub total: u64,
+    pub registered: u64,
+    pub available: u64,
+    pub errors: u64,
+    pub skipped: u64,
+    pub sites: u64,
+    pub elapsed_secs: f64,
+    pub max_len: usize,
+}
+
+impl Default for ScanState {
+    fn default() -> Self {
+        ScanState {
+            running: false,
+            finished: false,
+            error: None,
+            started_ts: 0,
+            finished_ts: 0,
+            total: 0,
+            registered: 0,
+            available: 0,
+            errors: 0,
+            skipped: 0,
+            sites: 0,
+            elapsed_secs: 0.0,
+            max_len: 0,
+        }
+    }
+}
+
+/// 服务上下文
+pub struct ServerCtx {
+    pub engine: Arc<SearchEngine>,
+    pub ai: AiConfig,
+    pub admin_token: String,
+    pub scan: Arc<Mutex<ScanState>>,
+}
+
+impl ServerCtx {
+    pub fn new(engine: Arc<SearchEngine>, ai: AiConfig, admin_token: String) -> ServerCtx {
+        ServerCtx {
+            engine,
+            ai,
+            admin_token,
+            scan: Arc::new(Mutex::new(ScanState::default())),
+        }
+    }
+
+    /// 管理员校验:Authorization: Bearer <token> 且与配置一致
+    fn is_admin(&self, req: &Request) -> bool {
+        if self.admin_token.is_empty() {
+            return false; // 未配置令牌 => 管理功能禁用
+        }
+        let auth = req.header("authorization").unwrap_or("");
+        let token = auth.strip_prefix("Bearer ").unwrap_or("").trim();
+        !token.is_empty() && token == self.admin_token
+    }
+}
+
+pub fn handle(ctx: &ServerCtx, req: &Request) -> Response {
     let path = req.path.as_str();
     match (req.method.as_str(), path) {
         ("GET", "/") => Response::html(200, WEB_UI),
         ("GET", "/api/docs") => Response::html(200, API_DOCS),
-        ("GET", "/api/status") => api_status(engine),
-        ("GET", "/api/stats") => api_stats(engine),
-        ("GET", "/api/search") => api_search(engine, ai, req),
-        ("GET", "/api/suggest") => api_suggest(engine, req),
-        ("GET", "/api/sitemap") => api_sitemap(engine, req),
-        ("GET", "/api/rebuild") => api_rebuild(engine),
+        ("GET", "/api/status") => api_status(ctx),
+        ("GET", "/api/stats") => api_stats(ctx),
+        ("GET", "/api/search") => api_search(ctx, req),
+        ("GET", "/api/suggest") => api_suggest(ctx, req),
+        ("GET", "/api/sitemap") => api_sitemap(ctx, req),
+        // ---- 管理员区 ----
+        ("GET", "/api/admin/status") => admin_guard(ctx, req, |ctx| admin_status(ctx)),
+        ("GET", "/api/admin/scan-status") => admin_guard(ctx, req, |ctx| admin_scan_status(ctx)),
+        ("POST", "/api/admin/scan") => admin_guard(ctx, req, |ctx| admin_scan(ctx, req)),
+        ("GET", "/api/admin/config") => admin_guard(ctx, req, |ctx| admin_config_get(ctx)),
+        ("POST", "/api/admin/config/tld") => admin_guard(ctx, req, |ctx| admin_config_save(ctx, req, "tld")),
+        ("POST", "/api/admin/config/dns") => admin_guard(ctx, req, |ctx| admin_config_save(ctx, req, "dns")),
+        ("POST", "/api/admin/rebuild") => admin_guard(ctx, req, |ctx| admin_rebuild(ctx)),
+        ("POST", "/api/rebuild") => admin_guard(ctx, req, |ctx| admin_rebuild(ctx)), // 旧路径,现需管理员
         _ => Response::not_found(),
     }
 }
 
-fn api_status(engine: &Arc<SearchEngine>) -> Response {
-    let idx = engine.index().lock().unwrap();
+/// 管理员守卫:无权限返回 403
+fn admin_guard(ctx: &ServerCtx, req: &Request, f: impl Fn(&ServerCtx) -> Response) -> Response {
+    if !ctx.is_admin(req) {
+        let msg = if ctx.admin_token.is_empty() {
+            r#"{"error":"管理功能未启用:请先在 config/engine.conf 配置 admin_token"}"#
+        } else {
+            r#"{"error":"无管理员权限:需请求头 Authorization: Bearer <admin_token>"}"#
+        };
+        return Response::json(403, msg);
+    }
+    f(ctx)
+}
+
+// ---------------- 公开 API ----------------
+
+fn api_status(ctx: &ServerCtx) -> Response {
+    let idx = ctx.engine.index().lock().unwrap();
     let (sites, terms, blocks) = idx.stats();
     let loaded = idx.loaded_blocks();
     drop(idx);
-    let (hits, misses) = engine.cache_stats();
+    let (hits, misses) = ctx.engine.cache_stats();
     let j = Json::build(vec![
         ("status", Json::str("ok")),
         ("name", Json::str("PILSEOCORE Local Search")),
@@ -53,12 +155,14 @@ fn api_status(engine: &Arc<SearchEngine>) -> Response {
         ("cache_hits", Json::num(hits as f64)),
         ("cache_misses", Json::num(misses as f64)),
         ("cache_hit_rate", Json::num(if hits + misses > 0 { hits as f64 / (hits + misses) as f64 } else { 0.0 })),
+        ("admin_enabled", Json::Bool(!ctx.admin_token.is_empty())),
+        ("scan_running", Json::Bool(ctx.scan.lock().unwrap().running)),
     ]);
     Response::json(200, &j.to_string())
 }
 
-fn api_stats(engine: &Arc<SearchEngine>) -> Response {
-    let idx = engine.index().lock().unwrap();
+fn api_stats(ctx: &ServerCtx) -> Response {
+    let idx = ctx.engine.index().lock().unwrap();
     let (sites, terms, blocks) = idx.stats();
     let docs: Vec<Json> = idx
         .docs
@@ -81,7 +185,7 @@ fn api_stats(engine: &Arc<SearchEngine>) -> Response {
     Response::json(200, &j.to_string())
 }
 
-fn api_search(engine: &Arc<SearchEngine>, ai: &AiConfig, req: &Request) -> Response {
+fn api_search(ctx: &ServerCtx, req: &Request) -> Response {
     let q = req.param("q").unwrap_or("").trim().to_string();
     let limit = req.param("limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(10).min(100);
     let want_ai = req.param("ai").map(|v| v == "1" || v == "true").unwrap_or(false);
@@ -89,7 +193,7 @@ fn api_search(engine: &Arc<SearchEngine>, ai: &AiConfig, req: &Request) -> Respo
         return Response::json(400, r#"{"error":"缺少参数 q"}"#);
     }
     let start = Instant::now();
-    let (total, hits) = engine.search(&q, limit);
+    let (total, hits) = ctx.engine.search(&q, limit);
     let elapsed_ms = start.elapsed().as_millis();
 
     let results: Vec<Json> = hits
@@ -112,11 +216,9 @@ fn api_search(engine: &Arc<SearchEngine>, ai: &AiConfig, req: &Request) -> Respo
         ("results", Json::arr(results)),
     ];
 
-    // 可选 AI 摘要
-    if want_ai && ai.enabled {
-        let ctx = build_ai_context(&q, &hits);
+    if want_ai && ctx.ai.enabled {
         let sys = "你是一个本地搜索引擎助手。基于给定的搜索结果,用简洁中文回答用户问题;若结果不足以回答,如实说明。";
-        match crate::ai::chat_completion(ai, sys, &ctx) {
+        match crate::ai::chat_completion(&ctx.ai, sys, &build_ai_context(&q, &hits)) {
             Ok(summary) => pairs.push(("ai_summary", Json::str(&summary))),
             Err(e) => pairs.push(("ai_error", Json::str(&e))),
         }
@@ -133,13 +235,13 @@ fn build_ai_context(q: &str, hits: &[crate::search::SearchHit]) -> String {
     s
 }
 
-fn api_suggest(engine: &Arc<SearchEngine>, req: &Request) -> Response {
+fn api_suggest(ctx: &ServerCtx, req: &Request) -> Response {
     let q = req.param("q").unwrap_or("").trim().to_string();
     let limit = req.param("limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(10).min(50);
     if q.is_empty() {
         return Response::json(400, r#"{"error":"缺少参数 q"}"#);
     }
-    let words = engine.suggest(&q, limit);
+    let words = ctx.engine.suggest(&q, limit);
     let j = Json::build(vec![
         ("query", Json::str(&q)),
         ("suggestions", Json::arr(words.into_iter().map(Json::str).collect())),
@@ -147,13 +249,12 @@ fn api_suggest(engine: &Arc<SearchEngine>, req: &Request) -> Response {
     Response::json(200, &j.to_string())
 }
 
-fn api_sitemap(engine: &Arc<SearchEngine>, req: &Request) -> Response {
+fn api_sitemap(ctx: &ServerCtx, req: &Request) -> Response {
     let domain = req.param("domain").unwrap_or("").trim().to_string();
     if domain.is_empty() {
         return Response::json(400, r#"{"error":"缺少参数 domain"}"#);
     }
-    // 从索引找该站点,返回其 sitemap 入口;本地站 sitemap.xml 由索引器生成
-    let site_dir = std::path::Path::new("out/sites").join(&domain);
+    let site_dir = Path::new("out/sites").join(&domain);
     let sitemap_path = site_dir.join("sitemap.xml");
     let mut urls = vec![format!("https://{}/", domain)];
     if let Ok(xml) = std::fs::read_to_string(&sitemap_path) {
@@ -166,7 +267,7 @@ fn api_sitemap(engine: &Arc<SearchEngine>, req: &Request) -> Response {
     }
     urls.sort();
     urls.dedup();
-    let _ = engine; // 域名列表来自文件系统
+    let _ = ctx;
     let j = Json::build(vec![
         ("domain", Json::str(&domain)),
         ("sitemap_url", Json::str(&format!("/out/sites/{}/sitemap.xml", domain))),
@@ -175,18 +276,226 @@ fn api_sitemap(engine: &Arc<SearchEngine>, req: &Request) -> Response {
     Response::json(200, &j.to_string())
 }
 
-fn api_rebuild(engine: &Arc<SearchEngine>) -> Response {
-    match engine.rebuild(
-        &std::path::Path::new("out/sites"),
-        &std::path::Path::new("data/index"),
-    ) {
-        Ok(n) => {
-            let j = Json::build(vec![
-                ("status", Json::str("ok")),
-                ("sites", Json::num(n as f64)),
-            ]);
-            Response::json(200, &j.to_string())
+// ---------------- 管理员 API ----------------
+
+fn scan_state_json(s: &ScanState) -> Json {
+    Json::build(vec![
+        ("running", Json::Bool(s.running)),
+        ("finished", Json::Bool(s.finished)),
+        ("error", match &s.error {
+            Some(e) => Json::str(e),
+            None => Json::Null,
+        }),
+        ("started_ts", Json::num(s.started_ts as f64)),
+        ("finished_ts", Json::num(s.finished_ts as f64)),
+        ("max_len", Json::num(s.max_len as f64)),
+        ("total", Json::num(s.total as f64)),
+        ("registered", Json::num(s.registered as f64)),
+        ("available", Json::num(s.available as f64)),
+        ("errors", Json::num(s.errors as f64)),
+        ("skipped", Json::num(s.skipped as f64)),
+        ("sites", Json::num(s.sites as f64)),
+        ("elapsed_secs", Json::num(s.elapsed_secs)),
+    ])
+}
+
+fn admin_status(ctx: &ServerCtx) -> Response {
+    let scan = ctx.scan.lock().unwrap().clone();
+    let tld = read_file_text("config/tld.list");
+    let dns = read_file_text("config/dns.list");
+    let j = Json::build(vec![
+        ("role", Json::str("admin")),
+        ("scan", scan_state_json(&scan)),
+        ("config", Json::build(vec![
+            ("tld_file", Json::str(&tld)),
+            ("dns_file", Json::str(&dns)),
+            ("tld_count", Json::num(count_words(&tld) as f64)),
+            ("dns_count", Json::num(count_words(&dns) as f64)),
+        ])),
+    ]);
+    Response::json(200, &j.to_string())
+}
+
+fn admin_scan_status(ctx: &ServerCtx) -> Response {
+    let scan = ctx.scan.lock().unwrap().clone();
+    Response::json(200, &scan_state_json(&scan).to_string())
+}
+
+fn admin_scan(ctx: &ServerCtx, req: &Request) -> Response {
+    // 解析 body: {"max_len":2, "min_len":1, "workers":64}
+    let body = String::from_utf8_lossy(&req.body);
+    let params = crate::json::parse(&body).unwrap_or(Json::obj());
+    let max_len = params
+        .get("max_len")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .filter(|v| (1..=6).contains(v))
+        .ok_or_json("参数 max_len 缺失或非法(范围 1-6)");
+    let max_len = match max_len {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let min_len = params.get("min_len").and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(1).min(max_len);
+    let workers = params
+        .get("workers")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .filter(|v| (1..=512).contains(v))
+        .unwrap_or(64);
+
+    // 防重复触发
+    {
+        let mut scan = ctx.scan.lock().unwrap();
+        if scan.running {
+            return Response::json(409, r#"{"error":"已有扫描任务在运行"}"#);
         }
+        *scan = ScanState::default();
+        scan.running = true;
+        scan.started_ts = now_secs();
+        scan.max_len = max_len;
+    }
+
+    let engine = ctx.engine.clone();
+    let scan_state = ctx.scan.clone();
+    std::thread::spawn(move || {
+        let result = run_scan_job(engine.clone(), min_len, max_len, workers);
+        let mut s = scan_state.lock().unwrap();
+        s.running = false;
+        s.finished = true;
+        s.finished_ts = now_secs();
+        s.elapsed_secs = (s.finished_ts - s.started_ts) as f64;
+        match result {
+            Ok(stats) => {
+                s.total = stats.total;
+                s.registered = stats.registered;
+                s.available = stats.available;
+                s.errors = stats.errors;
+                s.skipped = stats.skipped;
+                s.sites = stats.sites;
+            }
+            Err(e) => s.error = Some(e),
+        }
+        // 扫描完成后自动重建索引,让新站点立即可搜
+        let _ = engine.rebuild(Path::new("out/sites"), Path::new("data/index"));
+    });
+
+    Response::json(202, &Json::build(vec![("status", Json::str("scan_started")), ("max_len", Json::num(max_len as f64))]).to_string())
+}
+
+/// 在后台线程执行穷举扫描(独立读配置,仅覆盖 min/max_len 与 workers)
+fn run_scan_job(
+    _engine: Arc<SearchEngine>,
+    min_len: usize,
+    max_len: usize,
+    workers: usize,
+) -> Result<crate::engine::Stats, String> {
+    let mut cfg = crate::config::load_config(Path::new("config/engine.conf"))?;
+    cfg.min_len = min_len;
+    cfg.max_len = max_len;
+    cfg.workers = workers;
+    println!("[admin] 管理员触发穷举: 位数=[{},{}] workers={}", min_len, max_len, workers);
+    let eng = crate::engine::Engine::load(cfg)?;
+    let stats = eng.run(false)?;
+    println!(
+        "[admin] 穷举完成: 总数={} 可用={} 已注册={} 失败={} 建站={}",
+        stats.total, stats.available, stats.registered, stats.errors, stats.sites
+    );
+    Ok(stats)
+}
+
+fn admin_config_get(ctx: &ServerCtx) -> Response {
+    let _ = ctx;
+    let j = Json::build(vec![
+        ("tld", Json::str(&read_file_text("config/tld.list"))),
+        ("dns", Json::str(&read_file_text("config/dns.list"))),
+    ]);
+    Response::json(200, &j.to_string())
+}
+
+fn admin_config_save(_ctx: &ServerCtx, req: &Request, kind: &str) -> Response {
+    let body = String::from_utf8_lossy(&req.body);
+    let params = crate::json::parse(&body).unwrap_or(Json::obj());
+    let content = params.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    let content = content.trim();
+    if content.is_empty() {
+        return Response::json(400, r#"{"error":"content 不能为空"}"#);
+    }
+    // 校验:内容必须是合法条目(去注释后至少 1 个词)
+    let words = content
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with('#')
+        })
+        .flat_map(|l| l.split_whitespace())
+        .filter(|t| !t.starts_with('#'))
+        .count();
+    if words == 0 {
+        return Response::json(400, r#"{"error":"内容中没有任何有效条目"}"#);
+    }
+
+    let path = match kind {
+        "tld" => "config/tld.list",
+        "dns" => "config/dns.list",
+        _ => return Response::json(400, r#"{"error":"未知配置类型"}"#),
+    };
+    let text = if kind == "dns" {
+        // DNS 列表:每行一个,规范化
+        let mut out = String::from("# PILSEOCORE DNS 服务器列表(每行一个,随机负载均衡)\n");
+        for w in content.split_whitespace() {
+            out.push_str(w);
+            out.push('\n');
+        }
+        out
+    } else {
+        content.to_string() + "\n"
+    };
+    if let Err(e) = std::fs::write(path, text) {
+        return Response::json(500, &Json::build(vec![("status", Json::str("error")), ("message", Json::str(e.to_string()))]).to_string());
+    }
+    Response::json(200, &Json::build(vec![("status", Json::str("ok")), ("file", Json::str(path)), ("entries", Json::num(words as f64))]).to_string())
+}
+
+fn admin_rebuild(ctx: &ServerCtx) -> Response {
+    match ctx.engine.rebuild(Path::new("out/sites"), Path::new("data/index")) {
+        Ok(n) => Response::json(200, &Json::build(vec![("status", Json::str("ok")), ("sites", Json::num(n as f64))]).to_string()),
         Err(e) => Response::json(500, &Json::build(vec![("status", Json::str("error")), ("message", Json::str(&e))]).to_string()),
+    }
+}
+
+// ---------------- 工具 ----------------
+
+fn read_file_text(path: &str) -> String {
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
+fn count_words(text: &str) -> usize {
+    text.lines()
+        .filter(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with('#')
+        })
+        .flat_map(|l| l.split_whitespace())
+        .filter(|t| !t.starts_with('#'))
+        .count()
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 便捷 Result 转换:None -> 400 Response
+trait JsonErr {
+    fn ok_or_json(self, msg: &'static str) -> Result<usize, Response>;
+}
+impl JsonErr for Option<usize> {
+    fn ok_or_json(self, msg: &'static str) -> Result<usize, Response> {
+        match self {
+            Some(v) => Ok(v),
+            None => Err(Response::json(400, &format!(r#"{{"error":"{}"}}"#, msg))),
+        }
     }
 }

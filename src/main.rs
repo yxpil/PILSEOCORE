@@ -251,11 +251,18 @@ fn cmd_serve(args: &[String]) -> Result<(), String> {
     } else {
         println!("[ai] 未启用(engine.conf 中 ai_enabled = true 可开启 AI 摘要)");
     }
+    if cfg.admin_token.is_empty() {
+        println!("[admin] 管理功能禁用(engine.conf 配置 admin_token 后,管理员可触发穷举/改配置)");
+    } else {
+        println!("[admin] 管理功能已启用(Authorization: Bearer <admin_token>)");
+    }
 
+    let ctx = Arc::new(server::ServerCtx::new(engine, ai_cfg, cfg.admin_token.clone()));
     let addr = format!("127.0.0.1:{}", port);
-    let handler_engine = engine.clone();
-    let handler_ai = ai_cfg.clone();
-    http::serve(&addr, move |req| server::handle(&handler_engine, &handler_ai, req))
+    http::serve(&addr, move |req| {
+        let ctx = ctx.clone();
+        server::handle(&ctx, req)
+    })
 }
 
 fn cmd_index() -> Result<(), String> {
