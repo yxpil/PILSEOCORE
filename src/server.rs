@@ -578,6 +578,21 @@ fn admin_crawl(ctx: &ServerCtx, req: &Request) -> Response {
             seeds.push(format!("http://{}/", d));
         }
     }
+    // 1b. 全站已有域名种子(use_sites=true:把 out/sites 全部域名作为爬虫起点)
+    let use_sites = params.get("use_sites").and_then(|v| v.as_bool()).unwrap_or(false);
+    if use_sites {
+        let sites_dir = crate::config::sites_dir();
+        if let Ok(rd) = std::fs::read_dir(&sites_dir) {
+            for e in rd.flatten() {
+                if let Some(name) = e.file_name().to_str() {
+                    let name = name.trim();
+                    if !name.is_empty() && !name.starts_with('.') {
+                        seeds.push(format!("http://{}/", name));
+                    }
+                }
+            }
+        }
+    }
     // 2. 外链发现种子
     let disc_path = crate::config::index_dir().join("discovered.txt");
     if let Ok(text) = std::fs::read_to_string(&disc_path) {
@@ -599,9 +614,13 @@ fn admin_crawl(ctx: &ServerCtx, req: &Request) -> Response {
             }
         }
     }
-    // 去重
+    // 去重 + 黑名单过滤
     let mut seen_set = std::collections::HashSet::new();
     seeds.retain(|s| seen_set.insert(s.clone()));
+    seeds.retain(|s| {
+        let d = s.trim_start_matches("http://").trim_end_matches('/').to_lowercase();
+        !ctx.engine.blacklist.contains(&d)
+    });
     if seeds.is_empty() {
         return Response::json(400, r#"{"error":"没有种子:配置白名单/重建索引发现外链,或在 seeds 参数提供"}"#);
     }

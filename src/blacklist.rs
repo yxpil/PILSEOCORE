@@ -133,6 +133,10 @@ impl Blacklist {
         self.entries.lock().unwrap().iter().any(|e| e.domain == domain)
     }
 
+    pub fn contains(&self, domain: &str) -> bool {
+        self.is_blocked(domain)
+    }
+
     pub fn add(&self, domain: &str, reason: &str) {
         let mut entries = self.entries.lock().unwrap();
         if !entries.iter().any(|e| e.domain == domain) {

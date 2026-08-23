@@ -178,6 +178,10 @@
         </div>
         <label style="margin-top:12px">附加种子(每行一个域名或 URL)</label>
         <textarea id="crawlSeeds" placeholder="friend-site.com&#10;http://192.168.1.10/"></textarea>
+        <div style="margin-top:10px; display:flex; gap:16px; align-items:center">
+          <label style="margin:0"><input type="checkbox" id="crawlUseSites"> 使用全站已有域名(out/sites 全部域名作种子)</label>
+          <label style="margin:0"><input type="checkbox" id="crawlNoWhitelist"> 跳过白名单种子</label>
+        </div>
         <button class="btn" style="margin-top:10px" onclick="startCrawl()">开始抓取</button>
         <div class="state-line" id="crawlStats" style="margin-top:10px"></div>
       </div>
@@ -453,7 +457,9 @@ function startCrawl() {
     depth: parseInt(document.getElementById('crawlDepth').value, 10) || 3,
     max_pages: parseInt(document.getElementById('crawlMaxPages').value, 10) || 2000,
     per_domain: parseInt(document.getElementById('crawlPerDomain').value, 10) || 100,
-    workers: parseInt(document.getElementById('crawlWorkers').value, 10) || 0
+    workers: parseInt(document.getElementById('crawlWorkers').value, 10) || 0,
+    use_sites: document.getElementById('crawlUseSites').checked,
+    no_whitelist: document.getElementById('crawlNoWhitelist').checked
   };
   setMsg('msg', '爬虫已启动(后台抓取)...', 'warn');
   adminFetch('/api/admin/crawl', {
