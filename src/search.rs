@@ -204,13 +204,27 @@ impl SearchEngine {
 
     /// 全量搜索(折叠后),返回 (总组数, 全部折叠结果按相关度排序)
     fn search_all(&self, q: &str) -> (usize, Vec<SearchHit>) {
-        let phrase = q.trim().to_lowercase();
+        // 解析 site:xxx 语法(限定搜索范围,如"安卓 site:gfan.com")
+        let mut site_filter: Option<String> = None;
+        let mut clean_parts: Vec<&str> = Vec::new();
+        for part in q.split_whitespace() {
+            if let Some(d) = part.strip_prefix("site:") {
+                let d = d.trim().trim_end_matches('/').to_lowercase();
+                if !d.is_empty() {
+                    site_filter = Some(d);
+                }
+            } else {
+                clean_parts.push(part);
+            }
+        }
+        let clean_q = clean_parts.join(" ");
+        let phrase = clean_q.trim().to_lowercase();
         let idx = self.index.lock().unwrap();
         if idx.docs.is_empty() {
             return (0, Vec::new());
         }
         let tok = &idx.tokenizer;
-        let core = core_terms(q, tok);
+        let core = core_terms(&clean_q, tok);
 
         // ---- 候选收集:BPE 核心词精确查倒排(O(1) 词表查找,不做全表遍历) ----
         let mut candidates: HashSet<usize> = HashSet::new();
@@ -228,19 +242,30 @@ impl SearchEngine {
         // => 未登录词(语料低频,如"安卓"不在 BPE 词表):退化为全文档短语扫描,
         //    防止"明明有收录却搜不到";结果继续走相关度评分与折叠
         if terms.is_empty() {
-            // 纯 TLD / 纯标点 / 过短查询:短语扫描无意义,直接空
-            if is_tld_token(&phrase) || phrase.len() < 2 {
+            // 纯 TLD / 纯标点 / 过短查询:短语扫描无意义,直接空(纯 site: 查询除外)
+            if site_filter.is_none() && (is_tld_token(&phrase) || phrase.len() < 2) {
                 return (0, Vec::new());
             }
             for (doc_id, doc) in idx.docs.iter().enumerate() {
                 if self.blacklist.is_blocked(&doc.domain) {
                     continue;
                 }
+                // phrase 为空(纯 site: 查询)时 contains("") 恒 true → 全站候选
                 let text = format!("{} {} {} {}", doc.title, doc.description, doc.domain, doc.keywords.join(" ")).to_lowercase();
                 if text.contains(&phrase) {
                     candidates.insert(doc_id);
                 }
             }
+            if candidates.is_empty() {
+                return (0, Vec::new());
+            }
+        }
+        // site:xxx 限定搜索范围(域名精确或子域匹配)
+        if let Some(site) = &site_filter {
+            candidates.retain(|&doc_id| {
+                let d = &idx.docs[doc_id].domain;
+                *d == *site || d.ends_with(&format!(".{}", site))
+            });
             if candidates.is_empty() {
                 return (0, Vec::new());
             }

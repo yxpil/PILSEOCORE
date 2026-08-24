@@ -13,6 +13,27 @@ use std::time::Duration;
 /// favicon 占位图(SVG 字母图标,内存返回,不落盘)
 pub const FAVICON_PLACEHOLDER: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#1a73e8"/><text x="16" y="22" font-size="16" font-family="Arial" font-weight="bold" fill="#fff" text-anchor="middle">P</text></svg>"##;
 
+/// 现场生成域名首字母图标(SVG):favicon 抓不到时每个站显示自己的字母图标,
+/// 不再千篇一律蓝色 P。背景色由域名 hash 决定,首字母取域名第一个字符大写
+pub fn letter_icon_svg(domain: &str) -> String {
+    let d = domain.trim();
+    let ch = d
+        .chars()
+        .next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_else(|| "?".to_string());
+    // 域名 hash 决定背景色(HSL 色相 0-360,饱和度 55%,亮度 42%)
+    let mut h: u64 = 0;
+    for b in d.bytes() {
+        h = h.wrapping_mul(31).wrapping_add(b as u64);
+    }
+    let hue = (h % 360) as u32;
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="hsl({},55%,42%)"/><text x="16" y="23" font-size="17" font-family="Arial" font-weight="bold" fill="#fff" text-anchor="middle">{}</text></svg>"##,
+        hue, ch
+    )
+}
+
 /// HTTP 客户端:GET 请求,返回 (状态码, 响应体)。
 /// http:// 用内置明文客户端;https:// 走系统 curl(Windows 自带,零第三方依赖)
 pub fn http_get(url: &str, timeout_ms: u64, ua: &str) -> Result<(u16, String), String> {

@@ -871,7 +871,8 @@ fn admin_stats(ctx: &ServerCtx) -> Response {
     )
 }
 
-/// favicon:内存缓存返回图片;未缓存则懒抓取(失败返回占位)
+/// favicon:现场获取——favicon.ico 优先,失败解析页面 <link rel="icon"> 抓真实路径,
+/// 再失败返回域名首字母动态图标(每个站不同,不再统一蓝色 P)
 fn api_favicon(ctx: &ServerCtx, domain: &str) -> Response {
     let domain = domain.trim().to_lowercase();
     if domain.is_empty() {
@@ -881,7 +882,16 @@ fn api_favicon(ctx: &ServerCtx, domain: &str) -> Response {
     if ctx.crawler.favicon(&domain).is_none() {
         ctx.crawler.ensure_favicon(&domain);
     }
-    if let Some(bytes) = ctx.crawler.favicon(&domain) {
+    let mut bytes = ctx.crawler.favicon(&domain);
+    if bytes.is_none() {
+        // 现场获取:解析页面 <link rel="icon"> 抓真实 favicon(很多站不在根目录)
+        bytes = fetch_favicon_from_page(&domain);
+        if let Some(b) = &bytes {
+            ctx.crawler.favicons.lock().unwrap().insert(domain.clone(), b.clone());
+            ctx.crawler.favicon_order.lock().unwrap().push_back(domain.clone());
+        }
+    }
+    if let Some(bytes) = bytes {
         crate::http::Response {
             status: 200,
             content_type: "image/x-icon",
@@ -889,13 +899,58 @@ fn api_favicon(ctx: &ServerCtx, domain: &str) -> Response {
             extra_headers: vec![("Cache-Control".to_string(), "public, max-age=3600".to_string())],
         }
     } else {
+        // 兜底:域名首字母动态图标(现场生成,每站不同)
         crate::http::Response {
             status: 200,
             content_type: "image/svg+xml",
-            body: crate::http::FAVICON_PLACEHOLDER.as_bytes().to_vec(),
-            extra_headers: vec![],
+            body: crate::http::letter_icon_svg(&domain).into_bytes(),
+            extra_headers: vec![("Cache-Control".to_string(), "public, max-age=3600".to_string())],
         }
     }
+}
+
+/// 现场解析页面 <link rel="icon"> 抓取真实 favicon 路径
+fn fetch_favicon_from_page(domain: &str) -> Option<Vec<u8>> {
+    let url = format!("http://{}/", domain);
+    let (status, html) = crate::http::http_get(&url, 3000, crate::crawler::CRAWLER_UA).ok()?;
+    if status != 200 {
+        return None;
+    }
+    let lower = html.to_lowercase();
+    for rel in ["rel=\"icon\"", "rel=\"shortcut icon\""] {
+        let mut pos = 0;
+        while let Some(i) = lower[pos..].find(rel) {
+            let tag_start = pos + i;
+            let link_start = lower[..tag_start].rfind("<link").unwrap_or(0);
+            let tag_end = lower[tag_start..].find('>').map(|e| tag_start + e).unwrap_or(lower.len());
+            let tag = &lower[link_start..tag_end];
+            if let Some(hi) = tag.find("href=\"") {
+                let hs = hi + 6;
+                let he = tag[hs..].find('"').map(|e| hs + e).unwrap_or(tag.len());
+                let href = tag[hs..he].trim();
+                if !href.is_empty() {
+                    let abs = if href.starts_with("http") {
+                        href.to_string()
+                    } else if href.starts_with("//") {
+                        format!("http:{}", href)
+                    } else if href.starts_with('/') {
+                        format!("http://{}{}", domain, href)
+                    } else {
+                        format!("http://{}/{}", domain, href)
+                    };
+                    if abs.starts_with("http://") || abs.starts_with("https://") {
+                        if let Ok((s, body)) = crate::http::http_get(&abs, 3000, crate::crawler::CRAWLER_UA) {
+                            if s == 200 && !body.is_empty() && body.len() <= 256 * 1024 {
+                                return Some(body.into_bytes());
+                            }
+                        }
+                    }
+                }
+            }
+            pos = tag_end + 1;
+        }
+    }
+    None
 }
 
 /// 爬虫输出目录
