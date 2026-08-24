@@ -15,9 +15,17 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use crate::http::http_get;
+use crate::http::{http_get, http_get_full};
 
 pub const CRAWLER_UA: &str = "PilseoCrawler/1.0 (SEO kernel crawler)";
+/// 抓取用浏览器 UA 列表(桌面/手机各来一遍):响应式站点对不同 UA 返回不同内容,
+/// 多 UA 抓取取最全响应,识别更完整
+const CRAWLER_UAS: &[&str] = &[
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
+];
 /// favicon 内存缓存上限(条)
 const FAVICON_CACHE_MAX: usize = 500;
 
@@ -26,6 +34,7 @@ pub struct CrawlStats {
     pub fetched: usize,
     pub discovered: usize,
     pub failed: usize,
+    pub redirects: usize, // 跟随重定向次数(301/302/303/307/308)
     pub skipped_robots: usize,
     pub elapsed_secs: f64,
 }
@@ -302,53 +311,96 @@ fn worker_loop(
             crate::logger::push(format!("[crawler] robots 禁止,跳过: {}", url));
             continue;
         }
-        // 抓取
-        match http_get(&url, timeout_ms, CRAWLER_UA) {
-            Ok((status, html)) if status == 200 => {
-                let _ = save_page(&url, &html, out_dir);
-                stats.lock().unwrap().fetched += 1;
-                // favicon 内存缓存(懒加载)
-                ensure_fav(&domain, &favicons, &favicon_order);
-                // 链式发现链接(友链的友链继续解析),面板日志:XX 发现 YY 链接
-                if depth < max_depth {
-                    let mut new_links: Vec<String> = Vec::new();
-                    for link in extract_links(&html, &url) {
-                        stats.lock().unwrap().discovered += 1;
-                        new_links.push(link);
+        // 抓取:多种 UA 各来一遍(桌面/手机),响应式站点不同 UA 返回不同内容,
+        // 取最全响应体,重定向统一跟随
+        let mut best_html: Option<String> = None;
+        let mut all_html: Vec<String> = Vec::new();
+        let mut redirect_info: Option<(u16, Vec<(String, String)>)> = None;
+        for ua in CRAWLER_UAS {
+            match http_get_full(&url, timeout_ms, ua) {
+                Ok((status, _, html)) if status == 200 => {
+                    if best_html.as_ref().map_or(true, |b| html.len() > b.len()) {
+                        best_html = Some(html.clone());
                     }
-                    if !new_links.is_empty() {
-                        let sample: Vec<&str> = new_links.iter().take(5).map(|s| s.as_str()).collect();
-                        crate::logger::push(format!(
-                            "[crawler] 发现: {} 发现 {} 个链接: {}",
-                            domain,
-                            new_links.len(),
-                            sample.join(" , ")
-                        ));
+                    all_html.push(html);
+                }
+                Ok((status, headers, _)) if status == 301 || status == 302 || status == 303 || status == 307 || status == 308 => {
+                    if redirect_info.is_none() {
+                        redirect_info = Some((status, headers));
                     }
-                    {
-                        let mut v = visited.lock().unwrap();
-                        let mut q = queue.lock().unwrap();
-                        for link in new_links {
-                            if !v.contains(&link) {
-                                v.insert(link.clone());
-                                q.push_back((link, depth + 1));
-                            }
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        if let Some(html) = best_html {
+            let _ = save_page(&url, &html, out_dir);
+            stats.lock().unwrap().fetched += 1;
+            // favicon 内存缓存(懒加载)
+            ensure_fav(&domain, &favicons, &favicon_order);
+            // 链式发现链接(友链的友链继续解析):合并全部 UA 响应中发现的链接(去重),
+            // 面板日志:XX 发现 YY 链接
+            if depth < max_depth {
+                let mut new_links: Vec<String> = Vec::new();
+                let mut seen_link = std::collections::HashSet::new();
+                for h in &all_html {
+                    for link in extract_links(h, &url) {
+                        if seen_link.insert(link.clone()) {
+                            stats.lock().unwrap().discovered += 1;
+                            new_links.push(link);
+                        }
+                    }
+                }
+                if !new_links.is_empty() {
+                    let sample: Vec<&str> = new_links.iter().take(5).map(|s| s.as_str()).collect();
+                    crate::logger::push(format!(
+                        "[crawler] 发现: {} 发现 {} 个链接: {}",
+                        domain,
+                        new_links.len(),
+                        sample.join(" , ")
+                    ));
+                }
+                {
+                    let mut v = visited.lock().unwrap();
+                    let mut q = queue.lock().unwrap();
+                    for link in new_links {
+                        if !v.contains(&link) {
+                            v.insert(link.clone());
+                            q.push_back((link, depth + 1));
                         }
                     }
                 }
             }
-            Ok((status, _)) if status == 301 || status == 302 => {
-                crate::logger::push(format!("[crawler] 重定向跳过: {} -> {}", url, status));
-                stats.lock().unwrap().failed += 1;
+        } else if let Some((status, headers)) = redirect_info {
+            // 跟随重定向:从 Location 头解析目标,放回队列继续抓取识别(不跳过)
+            let loc = headers.iter().find(|(k, _)| k == "location").map(|(_, v)| v.clone());
+            match loc {
+                Some(target) => {
+                    let next = resolve_redirect_url(&url, &target);
+                    if next.starts_with("http://") {
+                        let mut v = visited.lock().unwrap();
+                        if !v.contains(&next) {
+                            v.insert(next.clone());
+                            stats.lock().unwrap().redirects += 1;
+                            crate::logger::push(format!("[crawler] {} 重定向跟随: {} -> {}", status, url, next));
+                            queue.lock().unwrap().push_back((next, depth));
+                        } else {
+                            crate::logger::push(format!("[crawler] {} 重定向循环跳过(已访问): {} -> {}", status, url, next));
+                        }
+                    } else {
+                        // https 等不支持协议的目标
+                        crate::logger::push(format!("[crawler] {} 重定向目标不支持: {} -> {}", status, url, target));
+                        stats.lock().unwrap().failed += 1;
+                    }
+                }
+                None => {
+                    crate::logger::push(format!("[crawler] {} 无 Location 头,跳过: {}", status, url));
+                    stats.lock().unwrap().failed += 1;
+                }
             }
-            Ok((status, _)) => {
-                crate::logger::push(format!("[crawler] 非 200 跳过: {} -> {}", url, status));
-                stats.lock().unwrap().failed += 1;
-            }
-            Err(e) => {
-                crate::logger::push(format!("[crawler] 抓取失败 {}: {}", url, e));
-                stats.lock().unwrap().failed += 1;
-            }
+        } else {
+            crate::logger::push(format!("[crawler] 抓取失败(全部 UA 不可达/非 200): {}", url));
+            stats.lock().unwrap().failed += 1;
         }
     }
 }
@@ -395,6 +447,26 @@ fn url_path(url: &str) -> String {
     }
 }
 
+/// 解析重定向目标 URL(绝对地址直接用;相对路径基于原 URL 拼接)
+fn resolve_redirect_url(base: &str, target: &str) -> String {
+    let t = target.trim();
+    if t.starts_with("http://") || t.starts_with("https://") {
+        return t.to_string();
+    }
+    if let Some(rest) = t.strip_prefix("//") {
+        // 协议相对:http:// 拼接
+        return format!("http://{}", rest);
+    }
+    if t.starts_with('/') {
+        // 根相对路径
+        let host = base.split('/').nth(2).unwrap_or("");
+        return format!("http://{}{}", host, t);
+    }
+    // 当前路径相对
+    let idx = base.rfind('/').unwrap_or(base.len());
+    format!("{}/{}", &base[..idx], t)
+}
+
 /// 域名(含端口,如 "example.com" / "127.0.0.1:8912")
 pub fn domain_of(url: &str) -> Option<String> {
     let rest = url.strip_prefix("http://")?;
@@ -410,7 +482,10 @@ fn normalize_url(url: &str) -> Option<String> {
     let mut u = url.trim().to_string();
     let lower_u = u.to_lowercase();
     if lower_u.starts_with("https://") {
-        u = format!("http://{}", &u[lower_u.find("://")? + 3..]);
+        // 用 u 自身的 find 索引切 u(to_lowercase 可能改变字节长度,索引会错位)
+        if let Some(i) = u.find("://") {
+            u = format!("http://{}", &u[i + 3..]);
+        }
     }
     if !u.starts_with("http://") {
         return None;
@@ -480,10 +555,13 @@ pub fn extract_links(html: &str, base: &str) -> Vec<String> {
     while let Some(rel) = lower[pos..].find("<a ") {
         let tag_start = pos + rel;
         let tag_end = lower[tag_start..].find('>').map(|e| tag_start + e).unwrap_or(html.len());
+        // lower 的索引不能直接切 html(to_lowercase 字节长度可能变化):对齐字符边界
+        let tag_start = html.floor_char_boundary(tag_start);
+        let tag_end = html.floor_char_boundary(tag_end);
         let tag = &html[tag_start..tag_end];
         for (attr, q) in [("href=\"", '"'), ("href='", '\'')] {
             if let Some(hi) = tag.to_lowercase().find(attr) {
-                let hs = hi + attr.len();
+                let hs = tag.floor_char_boundary(hi + attr.len());
                 if let Some(he) = tag[hs..].find(q) {
                     let href = &tag[hs..hs + he];
                     if let Some(u) = resolve_url(base, href) {
@@ -509,11 +587,12 @@ pub fn extract_links(html: &str, base: &str) -> Vec<String> {
             scan = start + 4;
             continue;
         };
-        let rest = &html[scheme_end..];
+        // 统一在 lower 上提取(索引自洽;URL 小写化无害,normalize 本就小写 host)
+        let rest = &lower[scheme_end..];
         let end = rest
             .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ')' || c == '>' || c == '<' || c == ']' || c == '`')
             .unwrap_or(rest.len());
-        let url = &html[start..scheme_end + end];
+        let url = &lower[start..scheme_end + end];
         if let Some(u) = normalize_url(url) {
             out.push(u);
         }
@@ -582,6 +661,24 @@ pub fn parse_whitelist(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_links_no_panic_on_unicode_case() {
+        // İ (U+0130) 小写化后字节变长:旧代码用 lower 索引切 html 会 panic
+        let html = "<html><body><a href=\"http://x.com/a\">İSTANBUL 中文</a><script>window.open('http://y.com/b')</script></body></html>";
+        let links = extract_links(html, "http://x.com/");
+        assert!(links.iter().any(|u| u.contains("x.com/a")), "a 链接应提取, got: {:?}", links);
+        assert!(links.iter().any(|u| u.contains("y.com/b")), "JS 链接应提取, got: {:?}", links);
+    }
+
+    #[test]
+    fn normalize_url_https_downgrade_unicode_path() {
+        // https 降级 + 非 ASCII 路径:索引错位旧代码 panic
+        let u = normalize_url("HTTPS://EXAMPLE.COM/中文路径?q=İstanbul");
+        assert!(u.is_some());
+        let u = u.unwrap();
+        assert!(u.starts_with("http://example.com/"), "got {}", u);
+    }
 
     #[test]
     fn normalize_and_resolve() {

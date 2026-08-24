@@ -16,6 +16,12 @@ pub const FAVICON_PLACEHOLDER: &str = r##"<svg xmlns="http://www.w3.org/2000/svg
 /// HTTP 客户端:GET 请求,返回 (状态码, 响应体)。
 /// 仅支持 http:// 明文(零依赖无 TLS);https 站点跳过
 pub fn http_get(url: &str, timeout_ms: u64, ua: &str) -> Result<(u16, String), String> {
+    let (status, _, body) = http_get_full(url, timeout_ms, ua)?;
+    Ok((status, body))
+}
+
+/// HTTP 客户端:GET 请求,返回 (状态码, 响应头(location 等), 响应体)
+pub fn http_get_full(url: &str, timeout_ms: u64, ua: &str) -> Result<(u16, Vec<(String, String)>, String), String> {
     let rest = url
         .strip_prefix("http://")
         .ok_or_else(|| format!("仅支持 http:// 明文地址: {}", url))?;
@@ -57,6 +63,7 @@ pub fn http_get(url: &str, timeout_ms: u64, ua: &str) -> Result<(u16, String), S
     // 响应头
     let mut content_length: Option<usize> = None;
     let mut chunked = false;
+    let mut headers: Vec<(String, String)> = Vec::new();
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).map_err(|e| format!("读取响应头失败: {}", e))? == 0 {
@@ -71,6 +78,8 @@ pub fn http_get(url: &str, timeout_ms: u64, ua: &str) -> Result<(u16, String), S
             content_length = v.trim().parse().ok();
         } else if lower.starts_with("transfer-encoding:") && lower.contains("chunked") {
             chunked = true;
+        } else if let Some(v) = lower.strip_prefix("location:") {
+            headers.push(("location".to_string(), v.trim().to_string()));
         }
     }
     // 响应体(限 8MB)
@@ -108,7 +117,7 @@ pub fn http_get(url: &str, timeout_ms: u64, ua: &str) -> Result<(u16, String), S
             body.truncate(max_body);
         }
     }
-    Ok((status, String::from_utf8_lossy(&body).into_owned()))
+    Ok((status, headers, String::from_utf8_lossy(&body).into_owned()))
 }
 
 #[derive(Clone, Debug)]

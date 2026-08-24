@@ -932,6 +932,7 @@ fn admin_crawl_status(ctx: &ServerCtx) -> Response {
             ("fetched", Json::num(st.fetched as f64)),
             ("discovered", Json::num(st.discovered as f64)),
             ("failed", Json::num(st.failed as f64)),
+            ("redirects", Json::num(st.redirects as f64)),
             ("skipped_robots", Json::num(st.skipped_robots as f64)),
             ("elapsed_secs", Json::num(st.elapsed_secs)),
         ])
