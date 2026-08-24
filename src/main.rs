@@ -258,6 +258,7 @@ fn cmd_serve(args: &[String]) -> Result<(), String> {
         ai_cfg,
         cfg.admin_user.clone(),
         cfg.admin_pass.clone(),
+        cfg.admin_show,
         tokens,
         sessions,
         crawler,

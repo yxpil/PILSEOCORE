@@ -87,6 +87,8 @@ pub struct ServerCtx {
     pub ai: AiConfig,
     pub admin_user: String,
     pub admin_pass: String,
+    /// 前端是否显示管理员入口(engine.conf admin_show=0 隐藏;仍可通过 /admin 直达)
+    pub admin_visible: bool,
     pub tokens: TokenStore,
     pub sessions: Sessions,
     pub scan: Arc<Mutex<ScanState>>,
@@ -104,6 +106,7 @@ impl ServerCtx {
         ai: AiConfig,
         admin_user: String,
         admin_pass: String,
+        admin_visible: bool,
         tokens: TokenStore,
         sessions: Sessions,
         crawler: Arc<crate::crawler::Crawler>,
@@ -115,6 +118,7 @@ impl ServerCtx {
             ai,
             admin_user,
             admin_pass,
+            admin_visible,
             tokens,
             sessions,
             scan: Arc::new(Mutex::new(ScanState::default())),
@@ -294,6 +298,7 @@ fn api_status(ctx: &ServerCtx) -> Response {
         ("cache_misses", Json::num(misses as f64)),
         ("cache_hit_rate", Json::num(if hits + misses > 0 { hits as f64 / (hits + misses) as f64 } else { 0.0 })),
         ("admin_enabled", Json::Bool(ctx.admin_enabled())),
+        ("admin_visible", Json::Bool(ctx.admin_visible)),
         ("blacklist", Json::num(ctx.engine.blacklist.blocked_count() as f64)),
         ("scan_running", Json::Bool(ctx.scan.lock().unwrap().running)),
     ]);
@@ -363,6 +368,18 @@ fn api_search(ctx: &ServerCtx, req: &Request) -> Response {
                 ])
             })
             .collect();
+        // 乱码/未知字符结果排到最后(质量优先,不影响正常结果)
+        meta_results.sort_by_key(|m| {
+            let title = m.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let bad = title.contains('\u{FFFD}')
+                || title.chars().any(|c| c.is_control() && c != '\n')
+                || title.chars().all(|c| !c.is_alphanumeric() && !c.is_whitespace());
+            if bad {
+                1
+            } else {
+                0
+            }
+        });
     }
     let meta_elapsed_ms = meta_ms;
 

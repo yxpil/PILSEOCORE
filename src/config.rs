@@ -30,6 +30,8 @@ pub struct Config {
     // 管理员控制:账号密码登录 Web UI;token 由管理员签发给 API/MCP
     pub admin_user: String,
     pub admin_pass: String,
+    /// 前端是否显示管理员入口(0=隐藏,仍可通过 /admin 直达;默认 1 显示)
+    pub admin_show: bool,
 }
 
 impl Default for Config {
@@ -57,6 +59,7 @@ impl Default for Config {
             ai_api_key: String::new(),
             admin_user: "admin".into(),
             admin_pass: String::new(),
+            admin_show: true,
         }
     }
 }
@@ -163,6 +166,7 @@ pub fn load_config(path: &Path) -> Result<Config, String> {
             "ai_api_key" => cfg.ai_api_key = v.clone(),
             "admin_user" => cfg.admin_user = v.clone(),
             "admin_pass" => cfg.admin_pass = v.clone(),
+            "admin_show" => cfg.admin_show = parse_bool(v).map_err(|_| format!("admin_show 应为 true/false: {}", v))?,
             _ => eprintln!("[warn] 忽略未知配置项: {}", k),
         }
     }

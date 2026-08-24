@@ -22,9 +22,11 @@
   /* 顶部导航(结果页):左对齐基准线 */
   #topbar { display:none; align-items:center; gap:20px; padding:18px 24px 10px; position:sticky; top:0; background:var(--bg); z-index:50; }
   #topbar .mini-logo { font-size:20px; font-weight:600; letter-spacing:-1px; cursor:pointer; white-space:nowrap; display:flex; align-items:center; gap:8px; }
-  #topbar .searchbox-wrap { flex:1; max-width:620px; }
-  #topbar .sb { border-radius:24px; border:1px solid var(--line); background:var(--search-bg); padding:11px 20px; font-size:16px; outline:none; width:100%; color:var(--text); }
+  #topbar .searchbox-wrap { flex:1; max-width:620px; position:relative; }
+  #topbar .sb { border-radius:24px; border:1px solid var(--line); background:var(--search-bg); padding:11px 20px; font-size:16px; outline:none; width:100%; color:var(--text); padding-right:76px; }
   #topbar .sb:focus, #topbar .sb:hover { box-shadow:0 1px 6px rgba(32,33,36,.28); border-color:transparent; }
+  #topbar .sb-btn { position:absolute; right:5px; top:50%; transform:translateY(-50%); border:none; background:var(--blue); color:#fff; border-radius:17px; padding:7px 18px; font-size:13px; cursor:pointer; }
+  #topbar .sb-btn:hover { opacity:.9; }
   .top-actions { display:flex; align-items:center; gap:14px; }
   .admin-link { color:var(--gray); font-size:13px; cursor:pointer; white-space:nowrap; }
   .admin-link:hover { color:var(--blue); }
@@ -61,7 +63,9 @@
   .result .url .fav { width:16px; height:16px; border-radius:3px; flex-shrink:0; }
   .result .title { font-size:20px; color:var(--link); display:block; }
   .result .title:hover { text-decoration:underline; }
-  .result .desc { color:var(--desc); font-size:14px; line-height:1.6; margin-top:4px; }
+  .result .desc { color:var(--desc); font-size:14px; line-height:1.6; margin-top:4px; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+  .result .desc.expanded { -webkit-line-clamp:unset; }
+  .desc-more { font-size:12px; color:var(--blue); cursor:pointer; margin-top:2px; display:inline-block; }
   .result .kw { color:var(--gray); font-size:12px; margin-top:2px; cursor:pointer; user-select:none; }
   .result .kw:hover { color:var(--blue); }
   .result .acts { display:flex; gap:14px; margin-top:5px; opacity:0; transition:opacity .15s; font-size:12px; }
@@ -114,7 +118,9 @@
   .bar-wrap { background:#f1f3f4; border-radius:8px; height:8px; overflow:hidden; margin-bottom:8px; }
   .bar { background:var(--blue); height:100%; width:0%; transition:width .3s ease; }
 
-  footer { color:var(--gray); font-size:12px; text-align:center; padding:24px; }
+  footer { color:var(--gray); font-size:12px; text-align:center; padding:24px; background:var(--foot); margin-top:20px; line-height:1.9; }
+  footer .foot-syntax { font-size:12px; }
+  footer code { background:var(--hover); border-radius:4px; padding:1px 5px; font-size:11px; }
 </style>
 </head>
 <body>
@@ -125,13 +131,12 @@
     <svg viewBox="0 0 24 24" width="22" height="22" style="flex-shrink:0"><circle cx="10" cy="10" r="6.5" fill="none" stroke="var(--blue)" stroke-width="2.2"/><line x1="15" y1="15" x2="21" y2="21" stroke="var(--green)" stroke-width="2.4" stroke-linecap="round"/></svg>
     <span style="color:var(--blue)">P</span><span style="color:var(--red)">I</span><span style="color:var(--yellow)">L</span><span style="color:var(--blue)">S</span><span style="color:var(--green)">E</span><span style="color:var(--red)">O</span><span style="color:var(--yellow)">C</span><span style="color:var(--blue)">O</span><span style="color:var(--green)">R</span><span style="color:var(--red)">E</span>
   </div>
-  <div class="searchbox-wrap"><input class="sb" id="topq" autocomplete="off" placeholder="搜索本地站点... (支持 site:域名 限定范围)" onkeydown="if(event.key==='Enter')doSearch(this.value)" oninput="debouncedSuggest(this.value)"></div>
+  <div class="searchbox-wrap"><input class="sb" id="topq" autocomplete="off" placeholder="搜索本地站点... (支持 site:域名 限定范围)" onkeydown="if(event.key==='Enter')doSearch(this.value)" oninput="debouncedSuggest(this.value)"><button class="sb-btn" onclick="doSearch(document.getElementById('topq').value)">搜索</button></div>
   <div class="top-actions">
     <span class="theme-btn" onclick="toggleTheme()" id="themeBtn">暗色</span>
     <span class="admin-link" onclick="openAdmin()">管理</span>
   </div>
 </div>
-<div id="syntaxTip">高级语法: <code>site:gfan.com</code> 限定站点 · <code>site:xxx 关键词</code> 组合搜索 · 本地无结果时自动借用必应/百度/360/搜狗/谷歌/中国搜索(结果缓存到本地)</div>
 
 <!-- 主页 -->
 <div id="home">
@@ -152,7 +157,11 @@
 
 <!-- 结果 -->
 <div id="results" style="display:none"></div>
-<footer id="foot" style="display:none">PILSEOCORE 本地搜索引擎 · 域名穷举 · 自动建站 · 本地索引</footer>
+<footer id="foot" style="display:none">
+  <div>PILSEOCORE 本地搜索引擎 · 域名穷举 · 自动建站 · 本地索引</div>
+  <div class="foot-syntax">高级语法: <code>site:gfan.com</code> 限定站点 · 本地无结果时自动借用必应/百度/360/搜狗/谷歌/中国搜索(结果缓存到本地)</div>
+  <div>© 2026 杨欣云(Yxpil) · PILSEOCORE Project · 保留作者署名</div>
+</footer>
 
 <!-- 管理员模态框 -->
 <div class="modal-mask" id="adminMask" onclick="if(event.target===this)closeAdmin()">
@@ -236,7 +245,6 @@ function doSearch(q, useAi, page) {
   if (useAi) url += '&ai=1';
   home.style.display = 'none';
   topbar.style.display = 'flex';
-  document.getElementById('syntaxTip').style.display = 'block';
   document.getElementById('topq').value = q;
   hidePanel();
   fetch(url).then(function(r){ return r.json(); }).then(function(d){
@@ -310,7 +318,7 @@ function render(d, q, page) {
   var gt = d.total || 0;
   var pages = Math.max(1, d.pages || 1);
   var cur = d.page || page;
-  html += '<div class="stat">' + (d.ai_summary ? 'AI 摘要已生成 · ' : '') + '找到 ' + gt + ' 组结果 (' + d.time_ms + ' 毫秒)</div>';
+  html += '<div class="stat">当前搜索: <b>' + esc(q) + '</b> · ' + (d.ai_summary ? 'AI 摘要已生成 · ' : '') + '找到 ' + gt + ' 组结果 (' + d.time_ms + ' 毫秒)</div>';
   if (d.ai_summary) {
     html += '<div class="ai-box"><div class="ai-label">AI 智能摘要</div><div class="ai-text">' + esc(d.ai_summary) + '</div></div>';
   }
@@ -320,11 +328,13 @@ function render(d, q, page) {
   if (!d.results || !d.results.length) {
     html += '<div class="empty">本地索引没有找到与 "' + esc(q) + '" 相关的结果</div>';
   }
-  d.results.forEach(function(r){
+  d.results.forEach(function(r, ri){
     html += '<div class="result">';
     html += '<div class="url"><img class="fav" src="/api/favicon/' + encodeURIComponent(r.domain) + '" alt="" onerror="this.style.display=\'none\'">' + esc(r.url) + '</div>';
     html += '<a class="title" href="' + esc(r.url) + '" target="_blank">' + highlight(q, r.title) + '</a>';
-    html += '<div class="desc">' + highlight(q, r.description || '') + '</div>';
+    var descText = r.description || '';
+    html += '<div class="desc" id="desc' + ri + '">' + highlight(q, descText) + '</div>';
+    if (descText.length > 140) html += '<span class="desc-more" onclick="expandDesc(' + ri + ')">展开</span>';
     if (r.fold_count > 1) html += '<div class="kw" onclick="this.style.display=\'none\'" title="点击收起">另有 ' + (r.fold_count - 1) + ' 个相同标题站点(点击收起)</div>';
     if (r.dup_count > 1) html += '<div class="kw" onclick="this.style.display=\'none\'" title="点击收起">另有 ' + (r.dup_count - 1) + ' 个相同内容站点(点击收起)</div>';
     html += '<div class="acts"><a href="' + esc(r.url) + '" target="_blank">打开</a><span onclick="copyLink(\'' + esc(r.url).replace(/'/g, "\\'") + '\')">复制链接</span><span onclick="blockDomain(\'' + esc(r.domain) + '\')">拉黑</span></div>';
@@ -366,6 +376,25 @@ function jumpToPage(q, pages) {
   if (n > pages) n = pages;
   doSearch(q, false, n);
 }
+
+/* 展开折叠的长描述 */
+function expandDesc(i) {
+  var el = document.getElementById('desc' + i);
+  if (!el) return;
+  el.classList.add('expanded');
+  var more = el.nextElementSibling;
+  if (more && more.classList && more.classList.contains('desc-more')) more.style.display = 'none';
+}
+
+/* 管理员入口隐藏(engine.conf admin_show=0 时前端不显示,仍可通过 /admin 直达) */
+function applyAdminVisibility() {
+  fetch('/api/status').then(function(r){ return r.json(); }).then(function(s){
+    if (s.admin_visible === false) {
+      document.querySelectorAll('.admin-link').forEach(function(el){ el.style.display = 'none'; });
+    }
+  }).catch(function(){});
+}
+applyAdminVisibility();
 
 function debouncedSuggest(q) {
   clearTimeout(suggestTimer);
