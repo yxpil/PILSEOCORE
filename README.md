@@ -25,6 +25,7 @@
 - **Google 风格 Web UI**:彩色 logo、搜索框、联想下拉、结果列表
 - **聚合搜索(元搜索)**:本地索引搜不到时,自动借用必应/百度/360搜索/搜狗/谷歌/中国搜索,每引擎翻页抓取 3 页(不只第一页),结果去重缓存到本地引擎,分页展示;管理后台可启停各引擎、添加自定义引擎(URL 模板 `{q}` 查询词、`{p}` 翻页);`engine.conf` 可配置 `meta_proxy`(如 `127.0.0.1:7890`)使谷歌等经代理可达
 - **节日 LOGO**:管理后台"前端入口"可上传 SVG/PNG 节日 LOGO(春节/国庆/中秋等),搜索页 Logo 即时替换,更真实的搜索引擎体验
+- **站点信息与备案**:管理后台"前端入口"可填写站点名称(标题/Logo/页脚同步)、ICP 备案号、公安备案号(工信部/公安部链接),搜索页页脚真实搜索引擎风格展示
 - **API + 文档**:`/api/search`、`/api/suggest`、`/api/status`、`/api/stats`、`/api/sitemap`、`/api/rebuild`,`/api/docs` 内置完整文档
 - **MCP 支持**:stdio JSON-RPC,工具 `search`/`suggest`/`status`/`sitemap`/`rebuild`,AI 客户端可直接调用
 - **AI 接入**:OpenAI 兼容端点(本地 llama-server/Ollama 等),搜索附加 AI 摘要

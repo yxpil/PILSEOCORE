@@ -257,6 +257,27 @@
         <div class="msg" id="adminShowMsg2"></div>
       </div>
       <div class="card">
+        <h3>站点信息与备案</h3>
+        <div style="margin-bottom:8px">
+          <label style="display:block;margin-bottom:4px">站点名称(显示在标题/Logo/页脚)</label>
+          <input type="text" id="siteName" placeholder="PILSEOCORE">
+        </div>
+        <div style="margin-bottom:8px">
+          <label style="display:block;margin-bottom:4px">ICP 备案号(留空不显示,如 京ICP备00000000号)</label>
+          <input type="text" id="siteIcp" placeholder="京ICP备00000000号">
+        </div>
+        <div style="margin-bottom:8px">
+          <label style="display:block;margin-bottom:4px">公安备案号(留空不显示,如 京公网安备 11000000000000 号)</label>
+          <input type="text" id="siteGongan" placeholder="京公网安备 11000000000000 号">
+        </div>
+        <div style="margin-bottom:8px">
+          <label style="display:block;margin-bottom:4px">公安备案链接</label>
+          <input type="text" id="siteGonganUrl" placeholder="https://beian.mps.gov.cn/">
+        </div>
+        <button class="btn sec sm" style="margin-top:6px" onclick="saveSiteInfo()">保存站点信息</button>
+        <div class="msg" id="siteMsg"></div>
+      </div>
+      <div class="card">
         <h3>节日 LOGO(替换搜索页 Logo,节日氛围)</h3>
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
           <span style="color:var(--gray);font-size:13px">当前 Logo:</span>
@@ -726,6 +747,29 @@ function loadFrontend() {
   img.onload = function(){ img.style.display = 'block'; document.getElementById('logoStatus').textContent = '已设置(节日 LOGO)'; };
   img.onerror = function(){ img.style.display = 'none'; document.getElementById('logoStatus').textContent = '未设置(显示内置默认 Logo)'; };
   img.src = '/api/logo?t=' + Date.now();
+  // 站点信息(名称/备案)
+  fetch('/api/site').then(function(r){ return r.json(); }).then(function(s){
+    document.getElementById('siteName').value = s.site_name || '';
+    document.getElementById('siteIcp').value = s.icp || '';
+    document.getElementById('siteGongan').value = s.gongan || '';
+    document.getElementById('siteGonganUrl').value = s.gongan_url || '';
+  }).catch(function(){});
+}
+function saveSiteInfo() {
+  var body = JSON.stringify({
+    site_name: document.getElementById('siteName').value.trim(),
+    icp: document.getElementById('siteIcp').value.trim(),
+    gongan: document.getElementById('siteGongan').value.trim(),
+    gongan_url: document.getElementById('siteGonganUrl').value.trim()
+  });
+  adminFetch('/api/admin/site', { method: 'POST', body: body })
+    .then(function(r){ return r.json(); }).then(function(d){
+      if (d.status === 'ok') {
+        setMsg('siteMsg', '已保存: 站点名称/备案信息已生效(刷新搜索页查看)', 'ok');
+      } else {
+        setMsg('siteMsg', '保存失败: ' + (d.error || '未知错误'), 'err');
+      }
+    }).catch(function(e){ setMsg('siteMsg', '保存失败: ' + e, 'err'); });
 }
 function saveAdminShow2() {
   var v = document.getElementById('adminShowCb2').checked;

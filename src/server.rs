@@ -173,6 +173,9 @@ pub fn handle(ctx: &ServerCtx, req: &Request) -> Response {
         ("GET", "/api/logo") => api_logo(ctx),
         ("POST", "/api/admin/logo") => admin_guard(ctx, req, |ctx| admin_logo_upload(ctx, req)),
         ("DELETE", "/api/admin/logo") => admin_guard(ctx, req, |ctx| admin_logo_delete(ctx)),
+        // ---- 站点信息(名称/ICP 备案/公安备案)----
+        ("GET", "/api/site") => api_site(ctx),
+        ("POST", "/api/admin/site") => admin_guard(ctx, req, |ctx| admin_site_save(ctx, req)),
         ("POST", "/api/admin/rebuild") => admin_guard(ctx, req, |ctx| admin_rebuild(ctx)),
         ("POST", "/api/rebuild") => admin_guard(ctx, req, |ctx| admin_rebuild(ctx)), // 旧路径,现需管理员
         ("GET", "/api/admin/index-status") => admin_guard(ctx, req, |ctx| admin_index_status(ctx)),
@@ -1150,6 +1153,58 @@ fn admin_logo_delete(_ctx: &ServerCtx) -> Response {
         let _ = std::fs::remove_file(&p);
     }
     crate::logger::push("[admin] 节日 LOGO 已删除,恢复默认".to_string());
+    Response::json(200, r#"{"status":"ok"}"#)
+}
+
+/// GET /api/site(公开):站点信息(名称/ICP 备案/公安备案)——前端标题、页脚展示
+fn api_site(_ctx: &ServerCtx) -> Response {
+    let s = crate::config::load_site_config();
+    Response::json(
+        200,
+        &Json::build(vec![
+            ("site_name", Json::str(&s.site_name)),
+            ("icp", Json::str(&s.icp)),
+            ("gongan", Json::str(&s.gongan)),
+            ("gongan_url", Json::str(&s.gongan_url)),
+        ])
+        .to_string(),
+    )
+}
+
+/// POST /api/admin/site(管理):保存站点信息
+fn admin_site_save(_ctx: &ServerCtx, req: &Request) -> Response {
+    let body = String::from_utf8_lossy(&req.body).to_string();
+    let Ok(j) = crate::json::parse(&body) else {
+        return Response::json(400, r#"{"error":"JSON 解析失败"}"#);
+    };
+    let mut cfg = crate::config::load_site_config();
+    if let Some(v) = j.get("site_name").and_then(|v| v.as_str()) {
+        let v = v.trim();
+        if !v.is_empty() {
+            cfg.site_name = v.to_string();
+        }
+    }
+    if let Some(v) = j.get("icp").and_then(|v| v.as_str()) {
+        cfg.icp = v.trim().to_string();
+    }
+    if let Some(v) = j.get("gongan").and_then(|v| v.as_str()) {
+        cfg.gongan = v.trim().to_string();
+    }
+    if let Some(v) = j.get("gongan_url").and_then(|v| v.as_str()) {
+        let v = v.trim();
+        if !v.is_empty() {
+            cfg.gongan_url = v.to_string();
+        }
+    }
+    if let Err(e) = crate::config::save_site_config(&cfg) {
+        return Response::json(500, &Json::build(vec![("error", Json::str(&e))]).to_string());
+    }
+    crate::logger::push(format!(
+        "[admin] 站点信息已更新: 名称={} ICP={} 公安={}",
+        cfg.site_name,
+        if cfg.icp.is_empty() { "无" } else { &cfg.icp },
+        if cfg.gongan.is_empty() { "无" } else { &cfg.gongan }
+    ));
     Response::json(200, r#"{"status":"ok"}"#)
 }
 

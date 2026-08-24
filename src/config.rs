@@ -214,6 +214,73 @@ pub fn save_admin_show(visible: bool) -> Result<(), String> {
     fs::write(path, lines.join("\n") + "\n").map_err(|e| format!("写入配置失败: {}", e))
 }
 
+/// 站点信息配置(data/site.conf):站点名称 + ICP 备案 + 公安备案
+#[derive(Clone, Debug)]
+pub struct SiteConfig {
+    pub site_name: String,
+    pub icp: String,
+    pub gongan: String,
+    pub gongan_url: String,
+}
+
+impl Default for SiteConfig {
+    fn default() -> Self {
+        SiteConfig {
+            site_name: "PILSEOCORE".into(),
+            icp: String::new(),
+            gongan: String::new(),
+            gongan_url: "https://beian.mps.gov.cn/".into(),
+        }
+    }
+}
+
+fn site_conf_path() -> std::path::PathBuf {
+    index_dir().join("site.conf")
+}
+
+/// 读取站点信息配置(缺省返回默认值)
+pub fn load_site_config() -> SiteConfig {
+    let mut cfg = SiteConfig::default();
+    if let Ok(text) = std::fs::read_to_string(site_conf_path()) {
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some(eq) = line.find('=') {
+                let k = line[..eq].trim();
+                let v = line[eq + 1..].trim().to_string();
+                match k {
+                    "site_name" => cfg.site_name = v,
+                    "icp" => cfg.icp = v,
+                    "gongan" => cfg.gongan = v,
+                    "gongan_url" => cfg.gongan_url = v,
+                    _ => {}
+                }
+            }
+        }
+    }
+    cfg
+}
+
+/// 保存站点信息配置(保留其它配置)
+pub fn save_site_config(cfg: &SiteConfig) -> Result<(), String> {
+    let _ = std::fs::create_dir_all(index_dir());
+    let text = format!(
+        "# 站点信息(管理后台'前端入口'可配置)\n\
+         # site_name = 站点名称(显示在标题/页脚/Logo 旁)\n\
+         # icp = ICP 备案号(如 京ICP备00000000号,留空不显示)\n\
+         # gongan = 公安备案号(如 京公网安备 11000000000000 号,留空不显示)\n\
+         # gongan_url = 公安备案链接\n\
+         site_name = {}\n\
+         icp = {}\n\
+         gongan = {}\n\
+         gongan_url = {}\n",
+        cfg.site_name, cfg.icp, cfg.gongan, cfg.gongan_url
+    );
+    std::fs::write(site_conf_path(), text).map_err(|e| format!("写入站点配置失败: {}", e))
+}
+
 /// 聚合搜索代理(engine.conf meta_proxy,如 127.0.0.1:7890;空=直连)。
 /// 谷歌等被墙引擎在 Clash 开启时经代理可达。
 pub fn meta_proxy() -> String {

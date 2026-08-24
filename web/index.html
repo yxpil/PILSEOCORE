@@ -32,6 +32,9 @@
   .admin-link:hover { color:var(--blue); }
   .theme-btn { color:var(--gray); font-size:13px; cursor:pointer; white-space:nowrap; border:1px solid var(--line); border-radius:16px; padding:5px 14px; background:var(--panel); }
   .theme-btn:hover { border-color:var(--blue); color:var(--blue); }
+  #logoNameTop, #logoNameHome { background:linear-gradient(90deg,var(--blue),var(--red),var(--yellow),var(--green)); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  #logoNameTop { font-size:20px; font-weight:600; letter-spacing:-1px; }
+  #logoNameHome { font-size:56px; font-weight:600; letter-spacing:-4px; }
 
   /* 语法提示条 */
   #syntaxTip { display:none; color:var(--gray); font-size:12px; padding:2px 24px 0; max-width:680px; }
@@ -130,7 +133,7 @@
   <div class="mini-logo" onclick="goHome()">
     <img id="logoTop" alt="" style="display:none;width:22px;height:22px;flex-shrink:0">
     <svg viewBox="0 0 24 24" width="22" height="22" style="flex-shrink:0"><circle cx="10" cy="10" r="6.5" fill="none" stroke="var(--blue)" stroke-width="2.2"/><line x1="15" y1="15" x2="21" y2="21" stroke="var(--green)" stroke-width="2.4" stroke-linecap="round"/></svg>
-    <span style="color:var(--blue)">P</span><span style="color:var(--red)">I</span><span style="color:var(--yellow)">L</span><span style="color:var(--blue)">S</span><span style="color:var(--green)">E</span><span style="color:var(--red)">O</span><span style="color:var(--yellow)">C</span><span style="color:var(--blue)">O</span><span style="color:var(--green)">R</span><span style="color:var(--red)">E</span>
+    <span id="logoNameTop">PILSEOCORE</span>
   </div>
   <div class="searchbox-wrap"><input class="sb" id="topq" autocomplete="off" placeholder="搜索本地站点... (支持 site:域名 限定范围)" onkeydown="if(event.key==='Enter')doSearch(this.value)" oninput="debouncedSuggest(this.value)"><button class="sb-btn" onclick="doSearch(document.getElementById('topq').value)">搜索</button></div>
   <div class="top-actions">
@@ -144,7 +147,7 @@
   <div class="big-logo">
     <img id="logoHome" alt="" style="display:none;width:44px;height:44px;flex-shrink:0">
     <svg viewBox="0 0 24 24" width="44" height="44" style="flex-shrink:0"><circle cx="10" cy="10" r="6.5" fill="none" stroke="var(--blue)" stroke-width="2.4"/><line x1="15" y1="15" x2="21" y2="21" stroke="var(--green)" stroke-width="2.6" stroke-linecap="round"/></svg>
-    <span style="color:var(--blue)">P</span><span style="color:var(--red)">I</span><span style="color:var(--yellow)">L</span><span style="color:var(--blue)">S</span><span style="color:var(--green)">E</span><span style="color:var(--red)">O</span><span style="color:var(--yellow)">C</span><span style="color:var(--blue)">O</span><span style="color:var(--green)">R</span><span style="color:var(--red)">E</span>
+    <span id="logoNameHome">PILSEOCORE</span>
   </div>
   <div id="suggest">
     <input class="sb" id="q" autocomplete="off" placeholder="搜索本地站点..." onkeydown="if(event.key==='Enter')doSearch(this.value)" oninput="debouncedSuggest(this.value)">
@@ -160,8 +163,13 @@
 <!-- 结果 -->
 <div id="results" style="display:none"></div>
 <footer id="foot" style="display:none">
-  <div>PILSEOCORE 本地搜索引擎 · 域名穷举 · 自动建站 · 本地索引</div>
+  <div><span id="footName">PILSEOCORE</span> 本地搜索引擎 · 域名穷举 · 自动建站 · 本地索引</div>
   <div class="foot-syntax">高级语法: <code>site:gfan.com</code> 限定站点 · 本地无结果时自动借用必应/百度/360/搜狗/谷歌/中国搜索(结果缓存到本地)</div>
+  <div class="foot-beian" id="footBeian" style="display:none">
+    <a id="beianIcp" href="https://beian.miit.gov.cn/" target="_blank" rel="noopener" style="color:var(--gray)"></a>
+    <span style="margin:0 6px;color:var(--gray)">·</span>
+    <a id="beianGongan" href="https://beian.mps.gov.cn/" target="_blank" rel="noopener" style="color:var(--gray)"></a>
+  </div>
   <div>© 2026 yxpil(笔名) · PILSEOCORE Project · 保留作者署名</div>
 </footer>
 
@@ -274,6 +282,33 @@ function loadFestiveLogo() {
   }).catch(function(){ /* 默认 SVG 保留 */ });
 }
 loadFestiveLogo();
+
+/* 站点信息:名称(标题/Logo/页脚)+ ICP 备案 + 公安备案(真实搜索引擎风格) */
+function loadSiteInfo() {
+  fetch('/api/site', { cache: 'no-store' }).then(function(r){ return r.json(); }).then(function(s){
+    var name = s.site_name || 'PILSEOCORE';
+    document.title = name + ' 本地搜索引擎';
+    var top = document.getElementById('logoNameTop');
+    var home = document.getElementById('logoNameHome');
+    var foot = document.getElementById('footName');
+    if (top) top.textContent = name;
+    if (home) home.textContent = name;
+    if (foot) foot.textContent = name;
+    // 备案信息(真实搜索引擎页脚风格)
+    var beian = document.getElementById('footBeian');
+    var icpA = document.getElementById('beianIcp');
+    var gaA = document.getElementById('beianGongan');
+    if (beian) {
+      var show = false;
+      if (s.icp) { icpA.textContent = s.icp; show = true; }
+      if (s.gongan) { gaA.textContent = s.gongan; gaA.href = s.gongan_url || 'https://beian.mps.gov.cn/'; show = true; }
+      beian.style.display = show ? 'block' : 'none';
+      if (!s.icp) icpA.style.display = 'none';
+      if (!s.gongan) gaA.style.display = 'none';
+    }
+  }).catch(function(){});
+}
+loadSiteInfo();
 
 /* 主题切换(亮/暗,localStorage 记忆) */
 function toggleTheme() {
