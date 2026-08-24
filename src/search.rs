@@ -121,8 +121,36 @@ impl SearchEngine {
             return Err("已有索引重建在进行中,本次跳过".into());
         }
         let result = (|| {
-            let idx = SiteIndex::build_with_progress(sites_dir, data_dir, &self.blacklist, Some(&self.index_state))?;
+            // 双缓冲(多分支不覆盖):构建到 data_dir.tmp,完成后原子切换。
+            // rebuild 期间旧索引继续服务(内存索引不释放,崩溃/失败也不破坏旧索引)
+            let tmp_dir = data_dir.with_extension("tmp");
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            // 保留分词词表(避免每次重训;新词走未登录词退化扫描兜底)
+            let tok_src = data_dir.join("tokenizer").join("vocab.json");
+            if tok_src.exists() {
+                let _ = std::fs::create_dir_all(tmp_dir.join("tokenizer"));
+                let _ = std::fs::copy(&tok_src, tmp_dir.join("tokenizer").join("vocab.json"));
+            }
+            let mut idx = SiteIndex::build_with_progress(sites_dir, &tmp_dir, &self.blacklist, Some(&self.index_state))?;
             let n = idx.docs.len();
+            // 原子切换:旧 index → index.old,新 tmp → index,成功后删 old;失败回滚
+            let old_dir = data_dir.with_extension("old");
+            let _ = std::fs::remove_dir_all(&old_dir);
+            if data_dir.exists() {
+                std::fs::rename(data_dir, &old_dir)
+                    .map_err(|e| format!("备份旧索引失败: {}", e))?;
+            }
+            match std::fs::rename(&tmp_dir, data_dir) {
+                Ok(()) => {
+                    let _ = std::fs::remove_dir_all(&old_dir);
+                }
+                Err(e) => {
+                    // 切换失败:回滚旧索引
+                    let _ = std::fs::rename(&old_dir, data_dir);
+                    return Err(format!("索引切换失败(已回滚旧索引): {}", e));
+                }
+            }
+            idx.data_dir = data_dir.to_path_buf(); // 修正为真实目录(切换后 tmp 路径失效)
             *self.index.lock().unwrap() = idx;
             let mut cache = self.hot_cache.lock().unwrap();
             cache.map.clear();

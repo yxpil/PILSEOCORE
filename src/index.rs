@@ -25,7 +25,7 @@ pub struct DocMeta {
 pub struct SiteIndex {
     pub docs: Vec<DocMeta>,
     pub blocks: Mutex<HashMap<u8, HashMap<String, Vec<usize>>>>,
-    data_dir: PathBuf,
+    pub(crate) data_dir: PathBuf,
     /// BPE 分词器(索引与查询共享同一词表)
     pub tokenizer: BpeTokenizer,
 }

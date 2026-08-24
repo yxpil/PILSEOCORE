@@ -145,6 +145,7 @@ const ADMIN_UI: &str = include_str!("../web/admin.html");
 pub fn handle(ctx: &ServerCtx, req: &Request) -> Response {
     let path = req.path.as_str();
     match (req.method.as_str(), path) {
+        ("GET", "/search") => Response::html(200, WEB_UI), // 搜索页(前端读 URL q/page 参数自动搜索)
         ("GET", "/") => Response::html(200, WEB_UI),
         ("GET", "/admin") => Response::html(200, ADMIN_UI),
         ("GET", "/api/docs") => Response::html(200, API_DOCS),
@@ -207,9 +208,55 @@ pub fn handle(ctx: &ServerCtx, req: &Request) -> Response {
             let domain = &p["/api/favicon/".len()..];
             api_favicon(ctx, domain)
         }
-        _ => Response::not_found(),
+        _ => page_not_found(path),
     }
 }
+
+/// 谷歌风格 404 页(浏览器路径):大标题 + 搜索框 + 提示;API 路径保持 JSON
+fn page_not_found(path: &str) -> Response {
+    if path.starts_with("/api/") {
+        return Response::json(404, r#"{"error":"not found"}"#);
+    }
+    Response::html(404, PAGE_404)
+}
+
+/// 404 美化页(学谷歌:大 404 + 搜索框 + 简洁提示)
+const PAGE_404: &str = r##"<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>404 - 页面不存在</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: Arial, "Microsoft YaHei", sans-serif; background: #f8f9fa; color: #202124; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; padding: 24px; }
+  .box { text-align: center; max-width: 560px; }
+  h1 { font-size: 96px; font-weight: 500; color: #202124; line-height: 1; }
+  .tag { font-size: 20px; margin: 16px 0 8px; }
+  .desc { font-size: 14px; color: #5f6368; margin-bottom: 24px; }
+  form { display: flex; gap: 8px; justify-content: center; }
+  input[type="text"] { width: 340px; max-width: 70vw; padding: 12px 16px; border: 1px solid #dfe1e5; border-radius: 24px; font-size: 16px; outline: none; }
+  input[type="text"]:focus { box-shadow: 0 1px 6px rgba(32,33,36,0.28); border-color: transparent; }
+  button { padding: 0 20px; background: #1a73e8; color: #fff; border: none; border-radius: 24px; font-size: 14px; cursor: pointer; }
+  button:hover { background: #1765cc; }
+  .back { margin-top: 28px; font-size: 13px; }
+  .back a { color: #1a73e8; text-decoration: none; }
+  .back a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>404</h1>
+  <div class="tag">此页面不存在</div>
+  <div class="desc">您访问的地址不存在或已被移除。试试搜索,或者返回首页。</div>
+  <form action="/search" method="get">
+    <input type="text" name="q" placeholder="搜索已收录的网站..." autofocus>
+    <button type="submit">搜索</button>
+  </form>
+  <div class="back"><a href="/">← 返回搜索引擎首页</a></div>
+</div>
+</body>
+</html>"##;
 
 /// 管理员守卫:无权限返回 403
 fn admin_guard(ctx: &ServerCtx, req: &Request, f: impl Fn(&ServerCtx) -> Response) -> Response {
