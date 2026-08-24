@@ -5,60 +5,86 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PILSEOCORE 本地搜索引擎</title>
 <style>
-  :root { --blue:#4285f4; --red:#ea4335; --yellow:#fbbc05; --green:#34a853; --gray:#5f6368; --line:#e0e0e0; }
+  :root {
+    --blue:#4285f4; --red:#ea4335; --yellow:#fbbc05; --green:#34a853;
+    --bg:#fff; --text:#202124; --panel:#fff; --line:#e0e0e0; --hover:#f1f3f4;
+    --link:#1a0dab; --desc:#4d5156; --gray:#5f6368; --search-bg:#fff; --mark-bg:#feebc8; --foot:#f2f2f2;
+  }
+  html[data-theme="dark"] {
+    --bg:#202124; --text:#e8eaed; --panel:#2d2e31; --line:#3c4043; --hover:#3c4043;
+    --link:#8ab4f8; --desc:#bdc1c6; --gray:#9aa0a6; --search-bg:#2d2e31; --mark-bg:#5c4a00; --foot:#171717;
+  }
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; background:#fff; color:#202124; }
+  body { font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); transition:background .2s; }
   a { text-decoration:none; }
+  mark { background:var(--mark-bg); color:inherit; border-radius:2px; padding:0 1px; }
 
-  /* 顶部导航(结果页) */
-  #topbar { display:none; align-items:center; gap:24px; padding:20px 32px 12px; }
-  #topbar .mini-logo { font-size:22px; font-weight:600; letter-spacing:-1px; cursor:pointer; white-space:nowrap; }
+  /* 顶部导航(结果页):左对齐基准线 */
+  #topbar { display:none; align-items:center; gap:20px; padding:18px 24px 10px; position:sticky; top:0; background:var(--bg); z-index:50; }
+  #topbar .mini-logo { font-size:20px; font-weight:600; letter-spacing:-1px; cursor:pointer; white-space:nowrap; display:flex; align-items:center; gap:8px; }
   #topbar .searchbox-wrap { flex:1; max-width:620px; }
-  #topbar .sb { border-radius:24px; border:1px solid var(--line); padding:11px 20px; font-size:16px; outline:none; width:100%; }
+  #topbar .sb { border-radius:24px; border:1px solid var(--line); background:var(--search-bg); padding:11px 20px; font-size:16px; outline:none; width:100%; color:var(--text); }
   #topbar .sb:focus, #topbar .sb:hover { box-shadow:0 1px 6px rgba(32,33,36,.28); border-color:transparent; }
+  .top-actions { display:flex; align-items:center; gap:14px; }
   .admin-link { color:var(--gray); font-size:13px; cursor:pointer; white-space:nowrap; }
   .admin-link:hover { color:var(--blue); }
+  .theme-btn { color:var(--gray); font-size:13px; cursor:pointer; white-space:nowrap; border:1px solid var(--line); border-radius:16px; padding:5px 14px; background:var(--panel); }
+  .theme-btn:hover { border-color:var(--blue); color:var(--blue); }
+
+  /* 语法提示条 */
+  #syntaxTip { display:none; color:var(--gray); font-size:12px; padding:2px 24px 0; max-width:680px; }
+  #syntaxTip code { background:var(--hover); border-radius:4px; padding:1px 5px; font-size:11px; }
 
   /* 主页 */
   #home { display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:70vh; padding:0 16px; }
-  #home .big-logo { font-size:64px; font-weight:600; letter-spacing:-4px; margin-bottom:32px; user-select:none; }
-  #home .sb { border-radius:28px; border:1px solid var(--line); padding:15px 24px; font-size:18px; outline:none; width:min(560px,90vw); box-shadow:none; }
+  #home .big-logo { display:flex; align-items:center; gap:14px; font-size:56px; font-weight:600; letter-spacing:-4px; margin-bottom:32px; user-select:none; }
+  #home .sb { border-radius:28px; border:1px solid var(--line); background:var(--search-bg); padding:15px 24px; font-size:18px; outline:none; width:min(560px,90vw); box-shadow:none; color:var(--text); }
   #home .sb:hover, #home .sb:focus { box-shadow:0 1px 6px rgba(32,33,36,.28); }
   #home .btns { display:flex; gap:12px; margin-top:24px; }
-  #home .btn { background:#f8f9fa; border:1px solid #f8f9fa; border-radius:6px; padding:10px 18px; font-size:14px; color:#3c4043; cursor:pointer; }
+  #home .btn { background:var(--foot); border:1px solid var(--foot); border-radius:6px; padding:10px 18px; font-size:14px; color:var(--text); cursor:pointer; }
   #home .btn:hover { border-color:var(--line); box-shadow:0 1px 2px rgba(0,0,0,.1); }
   #home .home-admin { margin-top:40px; }
 
   /* 联想下拉 */
   #suggest { position:relative; width:min(560px,90vw); }
-  #suggest .panel { position:absolute; top:6px; left:0; right:0; background:#fff; border-radius:16px; box-shadow:0 4px 20px rgba(32,33,36,.28); overflow:hidden; z-index:10; }
+  #suggest .panel { position:absolute; top:6px; left:0; right:0; background:var(--panel); border-radius:16px; box-shadow:0 4px 20px rgba(32,33,36,.28); overflow:hidden; z-index:10; }
   #suggest .item { padding:10px 22px; font-size:15px; cursor:pointer; display:flex; align-items:center; gap:10px; }
-  #suggest .item:hover, #suggest .item.active { background:#f1f3f4; }
-  #suggest .item .q { color:#202124; }
+  #suggest .item:hover, #suggest .item.active { background:var(--hover); }
+  #suggest .item .q { color:var(--text); }
 
-  /* 结果区 */
-  #results { max-width:640px; margin:8px auto 0; padding:0 16px 64px; }
-  .stat { color:var(--gray); font-size:13px; margin:0 0 18px; }
-  .result { margin-bottom:26px; }
-  .result .url { color:var(--green); font-size:13px; margin-bottom:2px; }
-  .result .url .fav { width:16px; height:16px; vertical-align:-3px; margin-right:6px; border-radius:3px; }
-  .result .title { font-size:20px; color:#1a0dab; }
+  /* 结果区:内容居左容器(符合行业惯例,横向扫读) */
+  #results { max-width:680px; margin:10px 0 0 24px; padding:0 0 64px; }
+  .stat { color:var(--gray); font-size:13px; margin:0 0 14px; }
+  .result { margin-bottom:22px; padding:8px 12px; border-radius:10px; margin-left:-12px; }
+  .result:hover { background:var(--hover); }
+  .result .url { color:var(--green); font-size:13px; margin-bottom:2px; display:flex; align-items:center; gap:6px; word-break:break-all; }
+  .result .url .fav { width:16px; height:16px; border-radius:3px; flex-shrink:0; }
+  .result .title { font-size:20px; color:var(--link); display:block; }
   .result .title:hover { text-decoration:underline; }
-  .result .desc { color:#4d5156; font-size:14px; line-height:1.58; margin-top:4px; }
-  .result .kw { color:#70757a; font-size:13px; margin-top:2px; }
-  .engine-tag { display:inline-block; background:#1a73e8; color:#fff; font-size:11px; border-radius:4px; padding:1px 6px; margin-right:6px; vertical-align:1px; }
-  .ai-box { background:#f8f9fa; border-radius:12px; padding:16px 20px; margin-bottom:24px; border:1px solid var(--line); }
+  .result .desc { color:var(--desc); font-size:14px; line-height:1.6; margin-top:4px; }
+  .result .kw { color:var(--gray); font-size:12px; margin-top:2px; cursor:pointer; user-select:none; }
+  .result .kw:hover { color:var(--blue); }
+  .result .acts { display:flex; gap:14px; margin-top:5px; opacity:0; transition:opacity .15s; font-size:12px; }
+  .result:hover .acts { opacity:1; }
+  .result .acts a, .result .acts span { color:var(--gray); cursor:pointer; }
+  .result .acts a:hover, .result .acts span:hover { color:var(--blue); }
+  .engine-tag { display:inline-block; background:#1a73e8; color:#fff; font-size:11px; border-radius:4px; padding:1px 6px; flex-shrink:0; }
+  .ai-box { background:var(--panel); border-radius:12px; padding:16px 20px; margin-bottom:24px; border:1px solid var(--line); }
   .ai-box .ai-label { font-size:12px; color:var(--gray); text-transform:uppercase; letter-spacing:1px; margin-bottom:8px; }
-  .ai-box .ai-text { font-size:14px; line-height:1.7; color:#202124; white-space:pre-wrap; }
+  .ai-box .ai-text { font-size:14px; line-height:1.7; color:var(--text); white-space:pre-wrap; }
   .ai-box .ai-err { color:var(--red); font-size:13px; margin-top:6px; }
 
   .empty { color:var(--gray); text-align:center; margin-top:80px; font-size:15px; }
-  .pager { display:flex; align-items:center; gap:6px; justify-content:center; margin:30px 0 10px; }
-  .pg { display:inline-block; min-width:40px; padding:10px 14px; border-radius:10px; font-size:14px; color:var(--blue); cursor:pointer; text-align:center; border:1px solid transparent; user-select:none; }
-  .pg:hover { background:#f1f3f4; }
+  .pager { display:flex; align-items:center; gap:6px; justify-content:center; margin:30px 0 10px; flex-wrap:wrap; }
+  .pg { display:inline-block; min-width:38px; padding:9px 12px; border-radius:10px; font-size:14px; color:var(--blue); cursor:pointer; text-align:center; border:1px solid transparent; user-select:none; }
+  .pg:hover { background:var(--hover); }
   .pg.cur { background:var(--blue); color:#fff; font-weight:600; box-shadow:0 1px 3px rgba(0,0,0,.15); }
-  .pg.dim { color:#dadce0; cursor:default; }
+  .pg.dim { color:var(--line); cursor:default; }
   .pg.next { border:1px solid var(--line); }
+  .pg-jump { display:flex; align-items:center; gap:6px; color:var(--gray); font-size:13px; margin-left:6px; }
+  .pg-jump input { width:48px; padding:7px 8px; border:1px solid var(--line); border-radius:8px; font-size:13px; text-align:center; background:var(--panel); color:var(--text); outline:none; }
+  .pg-jump input:focus { border-color:var(--blue); }
+  .pg-jump .go { color:var(--blue); cursor:pointer; }
 
   /* 模态框 */
   .modal-mask { display:none; position:fixed; inset:0; background:rgba(32,33,36,.5); z-index:100; }
@@ -95,14 +121,22 @@
 
 <!-- 顶部导航 -->
 <div id="topbar">
-  <div class="mini-logo" onclick="goHome()"><span style="color:var(--blue)">P</span><span style="color:var(--red)">I</span><span style="color:var(--yellow)">L</span><span style="color:var(--blue)">S</span><span style="color:var(--green)">E</span><span style="color:var(--red)">O</span><span style="color:var(--yellow)">C</span><span style="color:var(--blue)">O</span><span style="color:var(--green)">R</span><span style="color:var(--red)">E</span></div>
-  <div class="searchbox-wrap"><input class="sb" id="topq" autocomplete="off" placeholder="搜索本地站点..." onkeydown="if(event.key==='Enter')doSearch(this.value)" oninput="debouncedSuggest(this.value)"></div>
-  <span class="admin-link" onclick="openAdmin()">管理</span>
+  <div class="mini-logo" onclick="goHome()">
+    <svg viewBox="0 0 24 24" width="22" height="22" style="flex-shrink:0"><circle cx="10" cy="10" r="6.5" fill="none" stroke="var(--blue)" stroke-width="2.2"/><line x1="15" y1="15" x2="21" y2="21" stroke="var(--green)" stroke-width="2.4" stroke-linecap="round"/></svg>
+    <span style="color:var(--blue)">P</span><span style="color:var(--red)">I</span><span style="color:var(--yellow)">L</span><span style="color:var(--blue)">S</span><span style="color:var(--green)">E</span><span style="color:var(--red)">O</span><span style="color:var(--yellow)">C</span><span style="color:var(--blue)">O</span><span style="color:var(--green)">R</span><span style="color:var(--red)">E</span>
+  </div>
+  <div class="searchbox-wrap"><input class="sb" id="topq" autocomplete="off" placeholder="搜索本地站点... (支持 site:域名 限定范围)" onkeydown="if(event.key==='Enter')doSearch(this.value)" oninput="debouncedSuggest(this.value)"></div>
+  <div class="top-actions">
+    <span class="theme-btn" onclick="toggleTheme()" id="themeBtn">暗色</span>
+    <span class="admin-link" onclick="openAdmin()">管理</span>
+  </div>
 </div>
+<div id="syntaxTip">高级语法: <code>site:gfan.com</code> 限定站点 · <code>site:xxx 关键词</code> 组合搜索 · 本地无结果时自动借用必应/百度/360/搜狗/谷歌/中国搜索(结果缓存到本地)</div>
 
 <!-- 主页 -->
 <div id="home">
   <div class="big-logo">
+    <svg viewBox="0 0 24 24" width="44" height="44" style="flex-shrink:0"><circle cx="10" cy="10" r="6.5" fill="none" stroke="var(--blue)" stroke-width="2.4"/><line x1="15" y1="15" x2="21" y2="21" stroke="var(--green)" stroke-width="2.6" stroke-linecap="round"/></svg>
     <span style="color:var(--blue)">P</span><span style="color:var(--red)">I</span><span style="color:var(--yellow)">L</span><span style="color:var(--blue)">S</span><span style="color:var(--green)">E</span><span style="color:var(--red)">O</span><span style="color:var(--yellow)">C</span><span style="color:var(--blue)">O</span><span style="color:var(--green)">R</span><span style="color:var(--red)">E</span>
   </div>
   <div id="suggest">
@@ -202,10 +236,11 @@ function doSearch(q, useAi, page) {
   if (useAi) url += '&ai=1';
   home.style.display = 'none';
   topbar.style.display = 'flex';
+  document.getElementById('syntaxTip').style.display = 'block';
   document.getElementById('topq').value = q;
   hidePanel();
   fetch(url).then(function(r){ return r.json(); }).then(function(d){
-    render(d, q);
+    render(d, q, page);
     history.pushState({}, '', '/search?q=' + encodeURIComponent(q) + '&page=' + page);
   }).catch(function(e){
     resultsBox.innerHTML = '<div class="empty">请求失败:' + e + '</div>';
@@ -214,11 +249,67 @@ function doSearch(q, useAi, page) {
   });
 }
 
-function render(d, q) {
+/* 主题切换(亮/暗,localStorage 记忆) */
+function toggleTheme() {
+  var cur = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+  var next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('pilseo_theme', next);
+  document.getElementById('themeBtn').textContent = next === 'dark' ? '亮色' : '暗色';
+}
+(function(){
+  var t = localStorage.getItem('pilseo_theme');
+  if (t === 'dark') { document.documentElement.setAttribute('data-theme', 'dark'); }
+  var b = document.getElementById('themeBtn');
+  if (b) b.textContent = t === 'dark' ? '亮色' : '暗色';
+})();
+
+/* 关键词高亮:查询词(去 site: 语法)逐词高亮,先转义再标记 */
+function highlight(q, text) {
+  var words = (q || '').split(/\s+/).map(function(w){ return w.replace(/^site:/i, ''); }).filter(function(w){ return w.length >= 2 && !/^[a-z0-9.]+\.[a-z]{2,}$/i.test(w); });
+  var html = esc(text);
+  words.forEach(function(w){
+    if (!w) return;
+    var re;
+    try { re = new RegExp('(' + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi'); } catch(e) { return; }
+    html = html.replace(re, '<mark>$1</mark>');
+  });
+  return html;
+}
+
+/* 复制链接 */
+function copyLink(url) {
+  var done = function(){ /* 静默成功 */ };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(url).then(done).catch(function(){
+      fallbackCopy(url);
+    });
+  } else { fallbackCopy(url); }
+  var act = event && event.target;
+  if (act) { var old = act.textContent; act.textContent = '已复制'; setTimeout(function(){ act.textContent = old; }, 1200); }
+}
+function fallbackCopy(text) {
+  var ta = document.createElement('textarea');
+  ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); } catch(e) {}
+  document.body.removeChild(ta);
+}
+
+/* 拉黑域名提示(黑名单在管理后台维护) */
+function blockDomain(domain) {
+  if (confirm('拉黑 ' + domain + '?该域名将从索引中排除(在管理后台黑名单生效)')) {
+    var act = event && event.target;
+    if (act) { act.textContent = '请到管理后台确认'; setTimeout(function(){ act.textContent = '拉黑'; }, 2000); }
+  }
+}
+
+function render(d, q, page) {
+  page = page || 1;
   var html = '';
   var gt = d.total || 0;
   var pages = Math.max(1, d.pages || 1);
-  var cur = d.page || 1;
+  var cur = d.page || page;
   html += '<div class="stat">' + (d.ai_summary ? 'AI 摘要已生成 · ' : '') + '找到 ' + gt + ' 组结果 (' + d.time_ms + ' 毫秒)</div>';
   if (d.ai_summary) {
     html += '<div class="ai-box"><div class="ai-label">AI 智能摘要</div><div class="ai-text">' + esc(d.ai_summary) + '</div></div>';
@@ -232,10 +323,11 @@ function render(d, q) {
   d.results.forEach(function(r){
     html += '<div class="result">';
     html += '<div class="url"><img class="fav" src="/api/favicon/' + encodeURIComponent(r.domain) + '" alt="" onerror="this.style.display=\'none\'">' + esc(r.url) + '</div>';
-    html += '<a class="title" href="' + esc(r.url) + '" target="_blank">' + esc(r.title) + '</a>';
-    html += '<div class="desc">' + esc(r.description || '') + '</div>';
-    if (r.fold_count > 1) html += '<div class="kw">另有 ' + (r.fold_count - 1) + ' 个相同标题站点</div>';
-    if (r.dup_count > 1) html += '<div class="kw">另有 ' + (r.dup_count - 1) + ' 个相同内容站点</div>';
+    html += '<a class="title" href="' + esc(r.url) + '" target="_blank">' + highlight(q, r.title) + '</a>';
+    html += '<div class="desc">' + highlight(q, r.description || '') + '</div>';
+    if (r.fold_count > 1) html += '<div class="kw" onclick="this.style.display=\'none\'" title="点击收起">另有 ' + (r.fold_count - 1) + ' 个相同标题站点(点击收起)</div>';
+    if (r.dup_count > 1) html += '<div class="kw" onclick="this.style.display=\'none\'" title="点击收起">另有 ' + (r.dup_count - 1) + ' 个相同内容站点(点击收起)</div>';
+    html += '<div class="acts"><a href="' + esc(r.url) + '" target="_blank">打开</a><span onclick="copyLink(\'' + esc(r.url).replace(/'/g, "\\'") + '\')">复制链接</span><span onclick="blockDomain(\'' + esc(r.domain) + '\')">拉黑</span></div>';
     html += '</div>';
   });
   // 聚合搜索结果(本地搜不到 → 借外部搜索引擎,结果已缓存到本地引擎)
@@ -245,27 +337,34 @@ function render(d, q) {
     d.meta.forEach(function(m){
       html += '<div class="result">';
       html += '<div class="url"><span class="engine-tag">' + esc(m.engine) + '</span>' + esc(m.url) + '</div>';
-      html += '<a class="title" href="' + esc(m.url) + '" target="_blank">' + esc(m.title) + '</a>';
-      html += '<div class="desc">' + esc(m.snippet || '') + '</div>';
+      html += '<a class="title" href="' + esc(m.url) + '" target="_blank">' + highlight(q, m.title) + '</a>';
+      html += '<div class="desc">' + highlight(q, m.snippet || '') + '</div>';
+      html += '<div class="acts"><a href="' + esc(m.url) + '" target="_blank">打开</a><span onclick="copyLink(\'' + esc(m.url).replace(/'/g, "\\'") + '\')">复制链接</span></div>';
       html += '</div>';
     });
   }
-  // 分页导航
-  if (pages > 1) {
-    html += '<div class="pager">';
-    if (cur > 1) html += '<a class="pg" onclick="doSearch(\'' + esc(q).replace(/'/g, "\\'") + '\',false,' + (cur - 1) + ')">上一页</a>';
-    var start = Math.max(1, cur - 3), end = Math.min(pages, cur + 3);
-    if (start > 1) html += '<span class="pg dim">...</span>';
-    for (var i = start; i <= end; i++) {
-      html += (i === cur) ? '<span class="pg cur">' + i + '</span>' : '<a class="pg" onclick="doSearch(\'' + esc(q).replace(/'/g, "\\'") + '\',false,' + i + ')">' + i + '</a>';
-    }
-    if (end < pages) html += '<span class="pg dim">...</span>';
-    if (cur < pages) html += '<a class="pg" onclick="doSearch(\'' + esc(q).replace(/'/g, "\\'") + '\',false,' + (cur + 1) + ')">下一页</a>';
-    html += '</div>';
+  // 分页导航(总显示,支持跳页)
+  html += '<div class="pager">';
+  if (cur > 1) html += '<a class="pg next" onclick="doSearch(\'' + esc(q).replace(/'/g, "\\'") + '\',false,' + (cur - 1) + ')">上一页</a>';
+  var start = Math.max(1, cur - 3), end = Math.min(pages, cur + 3);
+  if (start > 1) html += '<span class="pg dim">...</span>';
+  for (var i = start; i <= end; i++) {
+    html += (i === cur) ? '<span class="pg cur">' + i + '</span>' : '<a class="pg" onclick="doSearch(\'' + esc(q).replace(/'/g, "\\'") + '\',false,' + i + ')">' + i + '</a>';
   }
+  if (end < pages) html += '<span class="pg dim">...</span>';
+  if (cur < pages) html += '<a class="pg next" onclick="doSearch(\'' + esc(q).replace(/'/g, "\\'") + '\',false,' + (cur + 1) + ')">下一页</a>';
+  html += '<span class="pg-jump">共 ' + pages + ' 页 跳至 <input type="number" min="1" max="' + pages + '" id="jumpPage" onkeydown="if(event.key===\'Enter\')jumpToPage(\'' + esc(q).replace(/'/g, "\\'") + '\',' + pages + ')"> <span class="go" onclick="jumpToPage(\'' + esc(q).replace(/'/g, "\\'") + '\',' + pages + ')">go</span></span>';
+  html += '</div>';
   resultsBox.innerHTML = html;
   resultsBox.style.display = 'block';
   foot.style.display = 'block';
+}
+
+function jumpToPage(q, pages) {
+  var n = parseInt(document.getElementById('jumpPage').value, 10);
+  if (!n || n < 1) n = 1;
+  if (n > pages) n = pages;
+  doSearch(q, false, n);
 }
 
 function debouncedSuggest(q) {

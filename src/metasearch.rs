@@ -159,15 +159,60 @@ fn strip_tags(s: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// HTML 实体解码(标题/摘要常见实体)
+/// HTML 实体解码(标题/摘要常见实体 + 数字/十六进制实体 &#NN; &#xNN;)
 fn decode_entities(s: &str) -> String {
-    s.replace("&quot;", "\"")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&nbsp;", " ")
-        .replace("&#39;", "'")
-        .replace("&#x27;", "'")
+    let mut out = String::new();
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'&' {
+            // 找分号
+            if let Some(semi_rel) = s[i..].find(';') {
+                let entity = &s[i + 1..i + semi_rel];
+                let decoded: Option<char> = if let Some(hex) = entity.strip_prefix("#x").or_else(|| entity.strip_prefix("#X")) {
+                    u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+                } else if let Some(dec) = entity.strip_prefix('#') {
+                    dec.parse::<u32>().ok().and_then(char::from_u32)
+                } else {
+                    match entity {
+                        "quot" => Some('"'),
+                        "amp" => Some('&'),
+                        "lt" => Some('<'),
+                        "gt" => Some('>'),
+                        "nbsp" => Some(' '),
+                        "apos" => Some('\''),
+                        _ => None,
+                    }
+                };
+                if let Some(c) = decoded {
+                    out.push(c);
+                    i += semi_rel + 1;
+                    continue;
+                }
+            }
+        }
+        // 非实体或未知实体:按 UTF-8 推进一个字符
+        let ch_len = utf8_len(bytes[i]);
+        let end = (i + ch_len).min(bytes.len());
+        out.push_str(&s[i..end]);
+        i = end;
+    }
+    out
+}
+
+/// UTF-8 首字节长度推断
+fn utf8_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b >> 5 == 0b110 {
+        2
+    } else if b >> 4 == 0b1110 {
+        3
+    } else if b >> 3 == 0b11110 {
+        4
+    } else {
+        1
+    }
 }
 
 /// 标题质量过滤:属性残留/JSON 残留/标签实体残留 → 丢弃
@@ -182,6 +227,27 @@ fn title_bad(title: &str) -> bool {
         || title.starts_with("href=")
         || title.starts_with("class=")
         || title.starts_with("style=")
+}
+
+/// 广告/低质内容特征词(聚合结果过滤:博彩、棋牌、代开发票等)
+const AD_KEYWORDS: &[&str] = &[
+    "博彩", "棋牌", "彩票", "赌博", "开户", "注册送", "真人娱乐", "六合彩", "时时彩",
+    "电竞竞猜", "百家乐", "澳门娱乐", "皇冠", "大发娱乐", "代开发票", "办证", "信用卡套现",
+];
+/// 英文广告词(按完整单词匹配,避免误伤 better/alphabet 等)
+const AD_WORDS_EN: &[&str] = &["bet", "bet365", "casino", "gambling", "porn", "xxx"];
+
+/// 广告特征检测(标题含中文特征词,或英文广告词完整出现)
+fn is_ad(title: &str) -> bool {
+    let lower = title.to_lowercase();
+    if AD_KEYWORDS.iter().any(|k| lower.contains(k)) {
+        return true;
+    }
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    AD_WORDS_EN.iter().any(|k| words.contains(k))
 }
 
 /// 通用结果解析:提取 <h2>/<h3> 内的 <a href> 作为搜索结果(主流引擎均用 h2/h3 包裹标题),
@@ -232,7 +298,7 @@ fn parse(html: &str, provider: &MetaProvider) -> Vec<MetaResult> {
                     let text_start = block.floor_char_boundary(a_tag_end + 1);
                     let a_end = block[text_start..].find("</a>").map(|e| text_start + e).unwrap_or(block.len());
                     let title = decode_entities(&strip_tags(&block[text_start..a_end]));
-                    if !title_bad(&title) && !title.is_empty() {
+                    if !title_bad(&title) && !title.is_empty() && !is_ad(&title) {
                         // 摘要:标题块全部文本去标题(截 180 字)
                         let all_text = decode_entities(&strip_tags(block));
                         let snippet = all_text
@@ -384,6 +450,9 @@ mod tests {
     fn decode_entities_works() {
         assert_eq!(decode_entities("a&amp;b&quot;c"), "a&b\"c");
         assert_eq!(decode_entities("&lt;em&gt;x&lt;/em&gt;"), "<em>x</em>");
+        // 十六进制/十进制数字实体(&#x27;= ' &#39;= ' &#x4e2d;= 中)
+        assert_eq!(decode_entities("&#x27;it&#39;s&#x4e2d;文"), "'it's中文");
+        assert_eq!(decode_entities("&#x4E2D;&#x56FD;"), "中国");
     }
 
     #[test]
@@ -393,6 +462,16 @@ mod tests {
         assert!(title_bad("href=\"/x\""));
         assert!(!title_bad("量子纠缠 百度百科"));
         assert!(!title_bad("是可控核聚变成功的关键"));
+    }
+
+    #[test]
+    fn ad_filter_works() {
+        assert!(is_ad("澳门威尼斯人博彩娱乐开户送体验金"));
+        assert!(is_ad("bet365 体育投注"));
+        assert!(is_ad("best casino online"));
+        assert!(!is_ad("better call saul 解析"));
+        assert!(!is_ad("alphabet 公司财报"));
+        assert!(!is_ad("区块链技术入门"));
     }
 
     #[test]
