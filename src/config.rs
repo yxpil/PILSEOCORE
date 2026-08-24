@@ -188,6 +188,32 @@ pub fn load_config(path: &Path) -> Result<Config, String> {
     Ok(cfg)
 }
 
+/// 保存 admin_show 到 engine.conf(运行时开关,保留其它配置)
+pub fn save_admin_show(visible: bool) -> Result<(), String> {
+    let path = std::path::Path::new("config/engine.conf");
+    let text = fs::read_to_string(path).map_err(|e| format!("读取配置失败: {}", e))?;
+    let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+    let key = "admin_show";
+    let mut found = false;
+    for line in lines.iter_mut() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(eq) = trimmed.find('=') {
+            if trimmed[..eq].trim() == key {
+                *line = format!("{} = {}", key, if visible { "true" } else { "false" });
+                found = true;
+                break;
+            }
+        }
+    }
+    if !found {
+        lines.push(format!("{} = {}", key, if visible { "true" } else { "false" }));
+    }
+    fs::write(path, lines.join("\n") + "\n").map_err(|e| format!("写入配置失败: {}", e))
+}
+
 fn parse_bool(s: &str) -> Result<bool, ()> {
     match s.trim().to_lowercase().as_str() {
         "true" | "1" | "yes" | "on" => Ok(true),

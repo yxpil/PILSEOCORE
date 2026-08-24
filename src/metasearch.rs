@@ -410,10 +410,21 @@ pub fn search_live(q: &str) -> Vec<MetaResult> {
         let qq = q_owned.clone();
         let url = p.url.replace("{q}", &urlencode(&qq));
         handles.push(std::thread::spawn(move || {
-            match crate::http::http_get(&url, 6000, BROWSER_UA) {
-                Ok((200, html)) => parse(&html, p),
-                _ => Vec::new(),
+            // 跟随重定向(必应等返回 302,最多 3 跳)
+            let mut cur_url = url.clone();
+            for _ in 0..3 {
+                match crate::http::http_get_full(&cur_url, 6000, BROWSER_UA) {
+                    Ok((300..=399, headers, _)) => {
+                        let Some(loc) = headers.iter().find(|(k, _)| k == "location").map(|(_, v)| v.clone()) else {
+                            return Vec::new();
+                        };
+                        cur_url = crate::crawler::resolve_redirect_url(&cur_url, &loc);
+                    }
+                    Ok((200, _, html)) => return parse(&html, p),
+                    _ => return Vec::new(),
+                }
             }
+            Vec::new()
         }));
     }
     // 自定义引擎(名称 + URL 模板,通用解析;URL 模板 {q} 占位)
@@ -422,10 +433,21 @@ pub fn search_live(q: &str) -> Vec<MetaResult> {
         let url = tmpl.replace("{q}", &urlencode(&qq));
         let provider = MetaProvider { id: "custom", name: Box::leak(name.into_boxed_str()), url: Box::leak(tmpl.into_boxed_str()), noise: &[] };
         handles.push(std::thread::spawn(move || {
-            match crate::http::http_get(&url, 6000, BROWSER_UA) {
-                Ok((200, html)) => parse(&html, &provider),
-                _ => Vec::new(),
+            // 跟随重定向(最多 3 跳)
+            let mut cur_url = url.clone();
+            for _ in 0..3 {
+                match crate::http::http_get_full(&cur_url, 6000, BROWSER_UA) {
+                    Ok((300..=399, headers, _)) => {
+                        let Some(loc) = headers.iter().find(|(k, _)| k == "location").map(|(_, v)| v.clone()) else {
+                            return Vec::new();
+                        };
+                        cur_url = crate::crawler::resolve_redirect_url(&cur_url, &loc);
+                    }
+                    Ok((200, _, html)) => return parse(&html, &provider),
+                    _ => return Vec::new(),
+                }
             }
+            Vec::new()
         }));
     }
     let mut all: Vec<MetaResult> = Vec::new();

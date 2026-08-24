@@ -238,18 +238,19 @@ function goHome() {
   history.pushState({}, '', '/');
 }
 
-function doSearch(q, useAi, page) {
+function doSearch(q, useAi, page, metaPage) {
   if (!q || !q.trim()) return;
   page = page || 1;
-  var url = '/api/search?q=' + encodeURIComponent(q.trim()) + '&limit=10&page=' + page;
+  metaPage = metaPage || 1;
+  var url = '/api/search?q=' + encodeURIComponent(q.trim()) + '&limit=10&page=' + page + '&meta_page=' + metaPage;
   if (useAi) url += '&ai=1';
   home.style.display = 'none';
   topbar.style.display = 'flex';
   document.getElementById('topq').value = q;
   hidePanel();
   fetch(url).then(function(r){ return r.json(); }).then(function(d){
-    render(d, q, page);
-    history.pushState({}, '', '/search?q=' + encodeURIComponent(q) + '&page=' + page);
+    render(d, q, page, metaPage);
+    history.pushState({}, '', '/search?q=' + encodeURIComponent(q) + '&page=' + page + '&meta_page=' + metaPage);
   }).catch(function(e){
     resultsBox.innerHTML = '<div class="empty">请求失败:' + e + '</div>';
     resultsBox.style.display = 'block';
@@ -312,8 +313,9 @@ function blockDomain(domain) {
   }
 }
 
-function render(d, q, page) {
+function render(d, q, page, metaPage) {
   page = page || 1;
+  metaPage = metaPage || 1;
   var html = '';
   var gt = d.total || 0;
   var pages = Math.max(1, d.pages || 1);
@@ -343,7 +345,10 @@ function render(d, q, page) {
   // 聚合搜索结果(本地搜不到 → 借外部搜索引擎,结果已缓存到本地引擎)
   if (d.meta && d.meta.length) {
     var metaLabel = d.meta_cache == 1 ? '聚合搜索(缓存)' : '聚合搜索(联网抓取)';
-    html += '<div class="stat" style="margin-top:14px">' + metaLabel + ' · ' + (d.meta_ms || 0) + ' 毫秒 · 来自必应/百度/360/搜狗/谷歌/中国搜索</div>';
+    var mTotal = d.meta_total || d.meta.length;
+    var mPages = d.meta_pages || 1;
+    var mCur = d.meta_page || metaPage;
+    html += '<div class="stat" style="margin-top:14px">' + metaLabel + ' · ' + (d.meta_ms || 0) + ' 毫秒 · 来自必应/百度/360/搜狗/谷歌/中国搜索 · 共 ' + mTotal + ' 条(第 ' + mCur + '/' + mPages + ' 页)</div>';
     d.meta.forEach(function(m){
       html += '<div class="result">';
       html += '<div class="url"><span class="engine-tag">' + esc(m.engine) + '</span>' + esc(m.url) + '</div>';
@@ -352,6 +357,18 @@ function render(d, q, page) {
       html += '<div class="acts"><a href="' + esc(m.url) + '" target="_blank">打开</a><span onclick="copyLink(\'' + esc(m.url).replace(/'/g, "\\'") + '\')">复制链接</span></div>';
       html += '</div>';
     });
+    // 聚合结果翻页
+    if (mPages > 1) {
+      var mq = esc(q).replace(/'/g, "\\'");
+      html += '<div class="pager" style="margin:10px 0 0;justify-content:flex-start">';
+      if (mCur > 1) html += '<a class="pg next" onclick="doSearch(\'' + mq + '\',false,' + page + ',' + (mCur - 1) + ')">上一页</a>';
+      for (var mi = 1; mi <= Math.min(mPages, 5); mi++) {
+        html += (mi === mCur) ? '<span class="pg cur">' + mi + '</span>' : '<a class="pg" onclick="doSearch(\'' + mq + '\',false,' + page + ',' + mi + ')">' + mi + '</a>';
+      }
+      if (mPages > 5) html += '<span class="pg dim">...</span>';
+      if (mCur < mPages) html += '<a class="pg next" onclick="doSearch(\'' + mq + '\',false,' + page + ',' + (mCur + 1) + ')">下一页</a>';
+      html += '</div>';
+    }
   }
   // 分页导航(总显示,支持跳页)
   html += '<div class="pager">';
@@ -657,7 +674,8 @@ function rebuildIndex() {
     var params = new URLSearchParams(location.search);
     var q = params.get('q');
     var pg = parseInt(params.get('page'), 10) || 1;
-    if (q) doSearch(q, false, pg);
+    var mp = parseInt(params.get('meta_page'), 10) || 1;
+    if (q) doSearch(q, false, pg, mp);
     else goHome();
   }
 })();

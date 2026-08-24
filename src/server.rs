@@ -88,7 +88,7 @@ pub struct ServerCtx {
     pub admin_user: String,
     pub admin_pass: String,
     /// 前端是否显示管理员入口(engine.conf admin_show=0 隐藏;仍可通过 /admin 直达)
-    pub admin_visible: bool,
+    pub admin_visible: std::sync::atomic::AtomicBool,
     pub tokens: TokenStore,
     pub sessions: Sessions,
     pub scan: Arc<Mutex<ScanState>>,
@@ -118,7 +118,7 @@ impl ServerCtx {
             ai,
             admin_user,
             admin_pass,
-            admin_visible,
+            admin_visible: std::sync::atomic::AtomicBool::new(admin_visible),
             tokens,
             sessions,
             scan: Arc::new(Mutex::new(ScanState::default())),
@@ -168,6 +168,7 @@ pub fn handle(ctx: &ServerCtx, req: &Request) -> Response {
         ("GET", "/api/admin/config") => admin_guard(ctx, req, |ctx| admin_config_get(ctx)),
         ("POST", "/api/admin/config/tld") => admin_guard(ctx, req, |ctx| admin_config_save(ctx, req, "tld")),
         ("POST", "/api/admin/config/dns") => admin_guard(ctx, req, |ctx| admin_config_save(ctx, req, "dns")),
+        ("POST", "/api/admin/config/admin_show") => admin_guard(ctx, req, |ctx| admin_config_admin_show(ctx, req)),
         ("POST", "/api/admin/rebuild") => admin_guard(ctx, req, |ctx| admin_rebuild(ctx)),
         ("POST", "/api/rebuild") => admin_guard(ctx, req, |ctx| admin_rebuild(ctx)), // 旧路径,现需管理员
         ("GET", "/api/admin/index-status") => admin_guard(ctx, req, |ctx| admin_index_status(ctx)),
@@ -298,7 +299,7 @@ fn api_status(ctx: &ServerCtx) -> Response {
         ("cache_misses", Json::num(misses as f64)),
         ("cache_hit_rate", Json::num(if hits + misses > 0 { hits as f64 / (hits + misses) as f64 } else { 0.0 })),
         ("admin_enabled", Json::Bool(ctx.admin_enabled())),
-        ("admin_visible", Json::Bool(ctx.admin_visible)),
+        ("admin_visible", Json::Bool(ctx.admin_visible.load(std::sync::atomic::Ordering::Relaxed))),
         ("blacklist", Json::num(ctx.engine.blacklist.blocked_count() as f64)),
         ("scan_running", Json::Bool(ctx.scan.lock().unwrap().running)),
     ]);
@@ -333,6 +334,7 @@ fn api_search(ctx: &ServerCtx, req: &Request) -> Response {
     let q = req.param("q").unwrap_or("").trim().to_string();
     let page = req.param("page").and_then(|s| s.parse::<usize>().ok()).unwrap_or(1).max(1);
     let limit = req.param("limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(10).min(100).max(1);
+    let meta_page = req.param("meta_page").and_then(|s| s.parse::<usize>().ok()).unwrap_or(1).max(1);
     let want_ai = req.param("ai").map(|v| v == "1" || v == "true").unwrap_or(false);
     if q.is_empty() {
         return Response::json(400, r#"{"error":"缺少参数 q"}"#);
@@ -349,6 +351,8 @@ fn api_search(ctx: &ServerCtx, req: &Request) -> Response {
     let mut meta_results: Vec<Json> = Vec::new();
     let mut meta_from_cache = false;
     let mut meta_ms = 0u128;
+    let mut meta_total = 0usize;
+    let mut meta_pages = 1usize;
     if total == 0 {
         let meta_start = Instant::now();
         let (meta, from_cache) = crate::metasearch::search_cached(&q);
@@ -380,6 +384,12 @@ fn api_search(ctx: &ServerCtx, req: &Request) -> Response {
                 0
             }
         });
+        // 聚合结果分页(每页 10 条,可翻页查看全部)
+        meta_total = meta_results.len();
+        meta_pages = (meta_total + 9) / 10;
+        let meta_page = meta_page.min(meta_pages.max(1));
+        let meta_start = (meta_page - 1) * 10;
+        meta_results = meta_results.into_iter().skip(meta_start).take(10).collect();
     }
     let meta_elapsed_ms = meta_ms;
 
@@ -408,6 +418,9 @@ fn api_search(ctx: &ServerCtx, req: &Request) -> Response {
         ("meta", Json::arr(meta_results)),
         ("meta_cache", if meta_from_cache { Json::num(1.0) } else { Json::num(0.0) }),
         ("meta_ms", Json::num(meta_elapsed_ms as f64)),
+        ("meta_page", Json::num(meta_page as f64)),
+        ("meta_pages", Json::num(meta_pages as f64)),
+        ("meta_total", Json::num(meta_total as f64)),
     ];
 
     if want_ai && ctx.ai.enabled {
@@ -1039,6 +1052,26 @@ fn admin_metasearch_save(ctx: &ServerCtx, req: &Request) -> Response {
         return Response::json(500, &Json::build(vec![("error", Json::str(&e))]).to_string());
     }
     crate::logger::push(format!("[admin] 聚合引擎配置已保存: 启用 {} 个, 自定义 {} 个", enabled.len(), custom.len()));
+    Response::json(200, r#"{"status":"ok"}"#)
+}
+
+/// 保存前端管理入口显示开关(admin_show):仅控制前端是否显示"管理"链接,
+/// 管理后台 /admin 与 API 始终可用
+fn admin_config_admin_show(ctx: &ServerCtx, req: &Request) -> Response {
+    let body = String::from_utf8_lossy(&req.body).to_string();
+    let Ok(j) = crate::json::parse(&body) else {
+        return Response::json(400, r#"{"error":"JSON 解析失败"}"#);
+    };
+    let visible = j.get("visible").and_then(|v| v.as_bool()).unwrap_or(true);
+    if let Err(e) = crate::config::save_admin_show(visible) {
+        return Response::json(500, &Json::build(vec![("error", Json::str(&e))]).to_string());
+    }
+    // 运行时立即生效(AtomicBool)
+    ctx.admin_visible.store(visible, std::sync::atomic::Ordering::Relaxed);
+    crate::logger::push(format!(
+        "[admin] 前端管理入口显示: {} (/admin 与 API 不受影响)",
+        if visible { "开启" } else { "隐藏" }
+    ));
     Response::json(200, r#"{"status":"ok"}"#)
 }
 

@@ -185,6 +185,15 @@
         <textarea id="dnsEdit"></textarea>
         <button class="btn sec sm" style="margin-top:10px" onclick="saveConfig('dns')">保存 DNS 列表</button>
       </div>
+      <div class="card">
+        <h3>前端入口</h3>
+        <label style="display:flex;align-items:center;gap:8px;margin:0">
+          <input type="checkbox" id="adminShowCb" style="width:auto">
+          搜索页显示"管理"入口(关闭后仅前端隐藏,管理后台 /admin 与 API 始终可用)
+        </label>
+        <button class="btn sec sm" style="margin-top:12px" onclick="saveAdminShow()">保存前端入口设置</button>
+        <div class="msg" id="adminShowMsg"></div>
+      </div>
     </section>
 
     <!-- 爬虫 -->
@@ -391,7 +400,7 @@ var dupPage = 1;
 function switchView(v) {
   document.querySelectorAll('.nav-item').forEach(function(n){ n.classList.toggle('active', n.getAttribute('data-view') === v); });
   document.querySelectorAll('.view').forEach(function(s){ s.classList.toggle('active', s.id === 'view-' + v); });
-  if (v === 'config') loadConfigs();
+  if (v === 'config') { loadConfigs(); loadAdminShow(); }
   if (v === 'tokens') loadTokens();
   if (v === 'blacklist') { loadBlacklist(1); ensureTimer('blacklist', function(){ loadBlacklist(blPage || 1); }, 30000); }
   if (v === 'crawl') { pollCrawl(); ensureTimer('crawl', pollCrawl, 2000); }
@@ -659,6 +668,20 @@ function cleanupSelected() {
     setMsg('msg', res.status === 200 ? '清理完成: 删除 ' + res.x.removed_dirs + ' 个目录,索引 ' + res.x.sites + ' 站' : ('失败: ' + (res.x.error || res.status)), res.status === 200 ? 'ok' : 'err');
     loadDuplicates(1);
   }).catch(function(e){ setMsg('msg', '请求失败: ' + e, 'err'); });
+}
+
+/* ============ 前端入口开关(admin_show) ============ */
+function loadAdminShow() {
+  fetch('/api/status').then(function(r){ return r.json(); }).then(function(s){
+    document.getElementById('adminShowCb').checked = s.admin_visible !== false;
+  }).catch(function(){});
+}
+function saveAdminShow() {
+  var v = document.getElementById('adminShowCb').checked;
+  adminFetch('/api/admin/config/admin_show', { method: 'POST', body: JSON.stringify({ visible: v }) })
+    .then(function(r){ return r.json(); }).then(function(d){
+      setMsg('adminShowMsg', '已保存: 前端管理入口' + (v ? '显示' : '隐藏(仍可通过 /admin 访问)'), 'ok');
+    }).catch(function(e){ setMsg('adminShowMsg', '保存失败: ' + e, 'err'); });
 }
 
 /* ============ 统计(饼图 + 性能分析) ============ */

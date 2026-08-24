@@ -550,7 +550,7 @@ fn url_path(url: &str) -> String {
 }
 
 /// 解析重定向目标 URL(绝对地址直接用;相对路径基于原 URL 拼接)
-fn resolve_redirect_url(base: &str, target: &str) -> String {
+pub fn resolve_redirect_url(base: &str, target: &str) -> String {
     let t = target.trim();
     if t.starts_with("http://") || t.starts_with("https://") {
         return t.to_string();
