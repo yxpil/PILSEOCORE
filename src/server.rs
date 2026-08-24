@@ -336,6 +336,30 @@ fn api_search(ctx: &ServerCtx, req: &Request) -> Response {
     let elapsed_ms = start.elapsed().as_millis();
     let pages = (total + limit - 1) / limit;
 
+    // 本地索引搜不到 → 聚合搜索(必应/百度/360/搜狗/谷歌/中国搜索),
+    // 结果缓存到本地引擎(下次同词直接命中,不再联网)
+    let mut meta_results: Vec<Json> = Vec::new();
+    let mut meta_from_cache = false;
+    let mut meta_ms = 0u128;
+    if total == 0 {
+        let meta_start = Instant::now();
+        let (meta, from_cache) = crate::metasearch::search_cached(&q);
+        meta_from_cache = from_cache;
+        meta_ms = meta_start.elapsed().as_millis();
+        meta_results = meta
+            .iter()
+            .map(|m| {
+                Json::build(vec![
+                    ("title", Json::str(&m.title)),
+                    ("url", Json::str(&m.url)),
+                    ("snippet", Json::str(&m.snippet)),
+                    ("engine", Json::str(&m.engine)),
+                ])
+            })
+            .collect();
+    }
+    let meta_elapsed_ms = meta_ms;
+
     let results: Vec<Json> = hits
         .iter()
         .map(|h| {
@@ -358,6 +382,9 @@ fn api_search(ctx: &ServerCtx, req: &Request) -> Response {
         ("time_ms", Json::num(elapsed_ms as f64)),
         ("total", Json::num(total as f64)),
         ("results", Json::arr(results)),
+        ("meta", Json::arr(meta_results)),
+        ("meta_cache", if meta_from_cache { Json::num(1.0) } else { Json::num(0.0) }),
+        ("meta_ms", Json::num(meta_elapsed_ms as f64)),
     ];
 
     if want_ai && ctx.ai.enabled {

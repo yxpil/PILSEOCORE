@@ -22,7 +22,7 @@ pub const CRAWLER_UA: &str = "PilseoCrawler/1.0 (SEO kernel crawler)";
 /// 多 UA 抓取取最全响应,识别更完整。
 /// 每个 UA 均带 SEO 爬虫身份标识(透明声明,遵守 robots,善意抓取):
 /// 网站能看到这是 SEO 搜索引擎在抓取,而非伪装浏览器
-const CRAWLER_UAS: &[&str] = &[
+pub const CRAWLER_UAS: &[&str] = &[
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 PilseoSEO/1.0 (+https://github.com/yxpil/PILSEOCORE)",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0 PilseoSEO/1.0 (+https://github.com/yxpil/PILSEOCORE)",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1 PilseoSEO/1.0 (+https://github.com/yxpil/PILSEOCORE)",

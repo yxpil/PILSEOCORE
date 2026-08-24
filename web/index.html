@@ -46,6 +46,7 @@
   .result .title:hover { text-decoration:underline; }
   .result .desc { color:#4d5156; font-size:14px; line-height:1.58; margin-top:4px; }
   .result .kw { color:#70757a; font-size:13px; margin-top:2px; }
+  .engine-tag { display:inline-block; background:#1a73e8; color:#fff; font-size:11px; border-radius:4px; padding:1px 6px; margin-right:6px; vertical-align:1px; }
   .ai-box { background:#f8f9fa; border-radius:12px; padding:16px 20px; margin-bottom:24px; border:1px solid var(--line); }
   .ai-box .ai-label { font-size:12px; color:var(--gray); text-transform:uppercase; letter-spacing:1px; margin-bottom:8px; }
   .ai-box .ai-text { font-size:14px; line-height:1.7; color:#202124; white-space:pre-wrap; }
@@ -226,7 +227,7 @@ function render(d, q) {
     html += '<div class="ai-box"><div class="ai-label">AI</div><div class="ai-err">' + esc(d.ai_error) + '</div></div>';
   }
   if (!d.results || !d.results.length) {
-    html += '<div class="empty">没有找到与 "' + esc(q) + '" 相关的结果</div>';
+    html += '<div class="empty">本地索引没有找到与 "' + esc(q) + '" 相关的结果</div>';
   }
   d.results.forEach(function(r){
     html += '<div class="result">';
@@ -237,6 +238,18 @@ function render(d, q) {
     if (r.dup_count > 1) html += '<div class="kw">另有 ' + (r.dup_count - 1) + ' 个相同内容站点</div>';
     html += '</div>';
   });
+  // 聚合搜索结果(本地搜不到 → 借外部搜索引擎,结果已缓存到本地引擎)
+  if (d.meta && d.meta.length) {
+    var metaLabel = d.meta_cache == 1 ? '聚合搜索(缓存)' : '聚合搜索(联网抓取)';
+    html += '<div class="stat" style="margin-top:14px">' + metaLabel + ' · ' + (d.meta_ms || 0) + ' 毫秒 · 来自必应/百度/360/搜狗/谷歌/中国搜索</div>';
+    d.meta.forEach(function(m){
+      html += '<div class="result">';
+      html += '<div class="url"><span class="engine-tag">' + esc(m.engine) + '</span>' + esc(m.url) + '</div>';
+      html += '<a class="title" href="' + esc(m.url) + '" target="_blank">' + esc(m.title) + '</a>';
+      html += '<div class="desc">' + esc(m.snippet || '') + '</div>';
+      html += '</div>';
+    });
+  }
   // 分页导航
   if (pages > 1) {
     html += '<div class="pager">';

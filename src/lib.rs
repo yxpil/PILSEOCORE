@@ -37,6 +37,7 @@ pub mod index;
 pub mod json;
 pub mod logger;
 pub mod mcp;
+pub mod metasearch;
 pub mod search;
 pub mod server;
 pub mod site;
