@@ -113,6 +113,7 @@
       <div class="nav-item" data-view="scan" onclick="switchView('scan')">穷举控制</div>
       <div class="nav-item" data-view="config" onclick="switchView('config')">后缀与 DNS</div>
       <div class="nav-item" data-view="crawl" onclick="switchView('crawl')">爬虫</div>
+      <div class="nav-item" data-view="frontend" onclick="switchView('frontend')">前端入口</div>
       <div class="nav-item" data-view="metasearch" onclick="switchView('metasearch')">聚合搜索</div>
       <div class="nav-item" data-view="tasks" onclick="switchView('tasks')">定时任务</div>
       <div class="nav-item" data-view="duplicates" onclick="switchView('duplicates')">重复清理</div>
@@ -239,6 +240,35 @@
         </div>
         <div id="dupList"></div>
         <div style="display:flex; gap:6px; justify-content:center; margin-top:12px" id="dupPager"></div>
+      </div>
+    </section>
+
+    <!-- 前端入口与外观 -->
+    <section id="view-frontend" class="view">
+      <h2>前端入口与外观</h2>
+      <div class="sub">搜索页前端的管理员入口显示开关 + 节日 LOGO 替换</div>
+      <div class="card">
+        <h3>前端管理员入口</h3>
+        <label style="display:flex;align-items:center;gap:8px;margin:0">
+          <input type="checkbox" id="adminShowCb2" style="width:auto">
+          搜索页显示"管理"入口(关闭后仅前端隐藏,管理后台 /admin 与 API 始终可用)
+        </label>
+        <button class="btn sec sm" style="margin-top:12px" onclick="saveAdminShow2()">保存</button>
+        <div class="msg" id="adminShowMsg2"></div>
+      </div>
+      <div class="card">
+        <h3>节日 LOGO(替换搜索页 Logo,节日氛围)</h3>
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+          <span style="color:var(--gray);font-size:13px">当前 Logo:</span>
+          <img id="logoPreview" alt="当前 LOGO" style="max-width:64px;max-height:64px;border:1px solid var(--line);border-radius:8px;background:#fff;display:none">
+          <span id="logoStatus" style="color:var(--gray);font-size:13px">未设置(显示内置默认 Logo)</span>
+        </div>
+        <input type="file" id="logoFile" accept=".svg,.png" style="width:auto">
+        <div style="margin-top:10px;display:flex;gap:10px">
+          <button class="btn sec sm" onclick="uploadLogo()">上传节日 LOGO</button>
+          <button class="btn danger sm" onclick="deleteLogo()">恢复默认</button>
+        </div>
+        <div class="msg" id="logoMsg"></div>
       </div>
     </section>
 
@@ -401,6 +431,7 @@ function switchView(v) {
   document.querySelectorAll('.nav-item').forEach(function(n){ n.classList.toggle('active', n.getAttribute('data-view') === v); });
   document.querySelectorAll('.view').forEach(function(s){ s.classList.toggle('active', s.id === 'view-' + v); });
   if (v === 'config') { loadConfigs(); loadAdminShow(); }
+  if (v === 'frontend') { loadFrontend(); }
   if (v === 'tokens') loadTokens();
   if (v === 'blacklist') { loadBlacklist(1); ensureTimer('blacklist', function(){ loadBlacklist(blPage || 1); }, 30000); }
   if (v === 'crawl') { pollCrawl(); ensureTimer('crawl', pollCrawl, 2000); }
@@ -682,6 +713,50 @@ function saveAdminShow() {
     .then(function(r){ return r.json(); }).then(function(d){
       setMsg('adminShowMsg', '已保存: 前端管理入口' + (v ? '显示' : '隐藏(仍可通过 /admin 访问)'), 'ok');
     }).catch(function(e){ setMsg('adminShowMsg', '保存失败: ' + e, 'err'); });
+}
+
+/* ============ 前端入口与外观(admin_show + 节日 LOGO) ============ */
+function loadFrontend() {
+  // 入口开关状态
+  fetch('/api/status').then(function(r){ return r.json(); }).then(function(s){
+    document.getElementById('adminShowCb2').checked = s.admin_visible !== false;
+  }).catch(function(){});
+  // LOGO 预览
+  var img = document.getElementById('logoPreview');
+  img.onload = function(){ img.style.display = 'block'; document.getElementById('logoStatus').textContent = '已设置(节日 LOGO)'; };
+  img.onerror = function(){ img.style.display = 'none'; document.getElementById('logoStatus').textContent = '未设置(显示内置默认 Logo)'; };
+  img.src = '/api/logo?t=' + Date.now();
+}
+function saveAdminShow2() {
+  var v = document.getElementById('adminShowCb2').checked;
+  adminFetch('/api/admin/config/admin_show', { method: 'POST', body: JSON.stringify({ visible: v }) })
+    .then(function(r){ return r.json(); }).then(function(d){
+      setMsg('adminShowMsg2', '已保存: 前端管理入口' + (v ? '显示' : '隐藏(仍可通过 /admin 访问)'), 'ok');
+    }).catch(function(e){ setMsg('adminShowMsg2', '保存失败: ' + e, 'err'); });
+}
+function uploadLogo() {
+  var f = document.getElementById('logoFile').files[0];
+  if (!f) { setMsg('logoMsg', '请先选择 SVG 或 PNG 文件', 'err'); return; }
+  var ext = f.name.split('.').pop().toLowerCase();
+  if (ext !== 'svg' && ext !== 'png') { setMsg('logoMsg', '仅支持 SVG 或 PNG', 'err'); return; }
+  setMsg('logoMsg', '上传中...', '');
+  adminFetch('/api/admin/logo?ext=' + ext, { method: 'POST', body: f })
+    .then(function(r){ return r.json(); }).then(function(d){
+      if (d.status === 'ok') {
+        setMsg('logoMsg', '已上传,刷新搜索页即可看到节日 LOGO', 'ok');
+        loadFrontend();
+      } else {
+        setMsg('logoMsg', '上传失败: ' + (d.error || '未知错误'), 'err');
+      }
+    }).catch(function(e){ setMsg('logoMsg', '上传失败: ' + e, 'err'); });
+}
+function deleteLogo() {
+  if (!confirm('删除节日 LOGO,恢复内置默认 Logo?')) return;
+  adminFetch('/api/admin/logo', { method: 'DELETE' })
+    .then(function(r){ return r.json(); }).then(function(d){
+      setMsg('logoMsg', '已恢复默认 Logo', 'ok');
+      loadFrontend();
+    }).catch(function(e){ setMsg('logoMsg', '删除失败: ' + e, 'err'); });
 }
 
 /* ============ 统计(饼图 + 性能分析) ============ */

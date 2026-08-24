@@ -169,6 +169,10 @@ pub fn handle(ctx: &ServerCtx, req: &Request) -> Response {
         ("POST", "/api/admin/config/tld") => admin_guard(ctx, req, |ctx| admin_config_save(ctx, req, "tld")),
         ("POST", "/api/admin/config/dns") => admin_guard(ctx, req, |ctx| admin_config_save(ctx, req, "dns")),
         ("POST", "/api/admin/config/admin_show") => admin_guard(ctx, req, |ctx| admin_config_admin_show(ctx, req)),
+        // ---- 节日 LOGO(替换搜索页 Logo)----
+        ("GET", "/api/logo") => api_logo(ctx),
+        ("POST", "/api/admin/logo") => admin_guard(ctx, req, |ctx| admin_logo_upload(ctx, req)),
+        ("DELETE", "/api/admin/logo") => admin_guard(ctx, req, |ctx| admin_logo_delete(ctx)),
         ("POST", "/api/admin/rebuild") => admin_guard(ctx, req, |ctx| admin_rebuild(ctx)),
         ("POST", "/api/rebuild") => admin_guard(ctx, req, |ctx| admin_rebuild(ctx)), // 旧路径,现需管理员
         ("GET", "/api/admin/index-status") => admin_guard(ctx, req, |ctx| admin_index_status(ctx)),
@@ -1072,6 +1076,80 @@ fn admin_config_admin_show(ctx: &ServerCtx, req: &Request) -> Response {
         "[admin] 前端管理入口显示: {} (/admin 与 API 不受影响)",
         if visible { "开启" } else { "隐藏" }
     ));
+    Response::json(200, r#"{"status":"ok"}"#)
+}
+
+/// 节日 LOGO 目录与路径(替换搜索页默认 Logo;SVG/PNG)
+fn logo_path() -> Option<std::path::PathBuf> {
+    let dir = crate::config::index_dir().join("logo");
+    for name in ["logo.png", "logo.svg"] {
+        let p = dir.join(name);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// GET /api/logo(公开):返回当前节日 LOGO,未设置则 404(前端回退内置 SVG)
+fn api_logo(_ctx: &ServerCtx) -> Response {
+    if let Some(p) = logo_path() {
+        if let Ok(bytes) = std::fs::read(&p) {
+            let is_png = p.extension().map(|e| e == "png").unwrap_or(false);
+            return Response {
+                status: 200,
+                content_type: if is_png { "image/png" } else { "image/svg+xml" },
+                body: bytes,
+                extra_headers: vec![],
+            };
+        }
+    }
+    Response::json(404, r#"{"error":"未设置节日 LOGO"}"#)
+}
+
+/// POST /api/admin/logo?ext=png|svg(管理):上传节日 LOGO,body 为原始文件字节
+fn admin_logo_upload(_ctx: &ServerCtx, req: &Request) -> Response {
+    let ext = req.param("ext").unwrap_or("svg").to_lowercase();
+    if ext != "png" && ext != "svg" {
+        return Response::json(400, r#"{"error":"仅支持 svg / png"}"#);
+    }
+    let body = &req.body;
+    if body.is_empty() || body.len() > 2 * 1024 * 1024 {
+        return Response::json(400, r#"{"error":"文件为空或过大(限 2MB)"}"#);
+    }
+    // 格式校验(防注入/伪装):PNG 魔数;SVG 必须以 <svg 开头
+    if ext == "png" {
+        if body.len() < 8 || &body[..8] != &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A] {
+            return Response::json(400, r#"{"error":"PNG 格式无效(魔数不匹配)"}"#);
+        }
+    } else {
+        let s = String::from_utf8_lossy(body);
+        if !s.trim_start().starts_with("<svg") {
+            return Response::json(400, r#"{"error":"SVG 格式无效(需以 <svg 开头)"}"#);
+        }
+    }
+    let dir = crate::config::index_dir().join("logo");
+    let _ = std::fs::create_dir_all(&dir);
+    // 替换旧文件(同 ext 覆盖,异 ext 互斥)
+    if ext == "png" {
+        let _ = std::fs::remove_file(dir.join("logo.svg"));
+    } else {
+        let _ = std::fs::remove_file(dir.join("logo.png"));
+    }
+    let path = dir.join(format!("logo.{}", ext));
+    if let Err(e) = std::fs::write(&path, body) {
+        return Response::json(500, &Json::build(vec![("error", Json::str(&format!("写入失败: {}", e)))]).to_string());
+    }
+    crate::logger::push(format!("[admin] 节日 LOGO 已上传: logo.{} ({} 字节)", ext, body.len()));
+    Response::json(200, &Json::build(vec![("status", Json::str("ok")), ("ext", Json::str(ext))]).to_string())
+}
+
+/// DELETE /api/admin/logo(管理):删除节日 LOGO,恢复默认
+fn admin_logo_delete(_ctx: &ServerCtx) -> Response {
+    if let Some(p) = logo_path() {
+        let _ = std::fs::remove_file(&p);
+    }
+    crate::logger::push("[admin] 节日 LOGO 已删除,恢复默认".to_string());
     Response::json(200, r#"{"status":"ok"}"#)
 }
 
