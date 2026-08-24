@@ -18,13 +18,15 @@ use std::sync::{Arc, Mutex};
 use crate::http::{http_get, http_get_full};
 
 pub const CRAWLER_UA: &str = "PilseoCrawler/1.0 (SEO kernel crawler)";
-/// 抓取用浏览器 UA 列表(桌面/手机各来一遍):响应式站点对不同 UA 返回不同内容,
-/// 多 UA 抓取取最全响应,识别更完整
+/// 抓取用 UA 列表(桌面/手机各来一遍):响应式站点对不同 UA 返回不同内容,
+/// 多 UA 抓取取最全响应,识别更完整。
+/// 每个 UA 均带 SEO 爬虫身份标识(透明声明,遵守 robots,善意抓取):
+/// 网站能看到这是 SEO 搜索引擎在抓取,而非伪装浏览器
 const CRAWLER_UAS: &[&str] = &[
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 PilseoSEO/1.0 (+https://github.com/yxpil/PILSEOCORE)",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0 PilseoSEO/1.0 (+https://github.com/yxpil/PILSEOCORE)",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1 PilseoSEO/1.0 (+https://github.com/yxpil/PILSEOCORE)",
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36 PilseoSEO/1.0 (+https://github.com/yxpil/PILSEOCORE)",
 ];
 /// favicon 内存缓存上限(条)
 const FAVICON_CACHE_MAX: usize = 500;
@@ -343,34 +345,43 @@ fn worker_loop(
         let mut best_html: Option<String> = None;
         let mut all_html: Vec<String> = Vec::new();
         let mut redirect_info: Option<(u16, Vec<(String, String)>)> = None;
+        let mut ua_results: Vec<String> = Vec::new(); // 每 UA 结果摘要(失败诊断)
         for ua in CRAWLER_UAS {
+            let tag = &ua[..ua.len().min(18)];
             match http_get_full(&url, timeout_ms, ua) {
                 Ok((status, _, html)) if status == 200 => {
+                    ua_results.push(format!("{}:200", tag));
                     if best_html.as_ref().map_or(true, |b| html.len() > b.len()) {
                         best_html = Some(html.clone());
                     }
                     all_html.push(html);
                 }
                 Ok((status, headers, _)) if status == 301 || status == 302 || status == 303 || status == 307 || status == 308 => {
+                    ua_results.push(format!("{}:{}", tag, status));
                     if redirect_info.is_none() {
                         redirect_info = Some((status, headers));
                     }
                 }
-                Ok(_) => {}
-                Err(_) => {}
+                Ok((status, _, _)) => ua_results.push(format!("{}:{}", tag, status)),
+                Err(_) => ua_results.push(format!("{}:ERR", tag)),
             }
         }
         // http 全部 UA 失败(连接失败/超时)→ 站点可能只支持 https:单 UA 试一次 https
         let mut effective_url = url.clone();
         if best_html.is_none() && redirect_info.is_none() && url.starts_with("http://") {
             let https_url = format!("https://{}", &url["http://".len()..]);
-            if let Ok((status, headers, html)) = http_get_full(&https_url, timeout_ms, CRAWLER_UAS[0]) {
-                if status == 200 {
+            match http_get_full(&https_url, timeout_ms, CRAWLER_UAS[0]) {
+                Ok((status, _, html)) if status == 200 => {
                     best_html = Some(html);
-                } else if (301..=308).contains(&status) {
+                    ua_results.push("https:200".to_string());
+                }
+                Ok((status, headers, _)) if (301..=308).contains(&status) => {
                     redirect_info = Some((status, headers));
                     effective_url = https_url;
+                    ua_results.push(format!("https:{}", status));
                 }
+                Ok((status, _, _)) => ua_results.push(format!("https:{}", status)),
+                Err(_) => ua_results.push("https:ERR".to_string()),
             }
         }
         if let Some(html) = best_html {
@@ -440,7 +451,7 @@ fn worker_loop(
                 }
             }
         } else {
-            crate::logger::push(format!("[crawler] 抓取失败(全部 UA 不可达/非 200): {}", url));
+            crate::logger::push(format!("[crawler] 抓取失败 {} | UA结果: {}", url, ua_results.join(" ")));
             stats.lock().unwrap().failed += 1;
         }
     }
