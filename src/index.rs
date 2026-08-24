@@ -196,6 +196,80 @@ impl SiteIndex {
                     }
                     continue;
                 }
+                // ---- crawled 目录(爬虫抓取):页面级独立收录 ----
+                // 不依赖 index.html(首页没抓到也收录子页);每页独立指纹去重
+                // (首页是模板/重复不牵连子页,发现链接真正编入索引)
+                let is_crawled = sd.ends_with("crawled");
+                if is_crawled {
+                    let pages = discover_pages(&dir);
+                    if pages.is_empty() {
+                        continue;
+                    }
+                    for (rel, page_html) in &pages {
+                        let fp_text = crate::blacklist::fingerprint_text(&domain, &extract_page_text(page_html));
+                        let fh = crate::blacklist::fnv1a64(&fp_text);
+                        let fp = crate::blacklist::simhash(&fp_text);
+                        let fp_len = fp_text.len();
+                        let mut dup_target: Option<usize> = None;
+                        if let Some(&(_, _, doc_id)) = fingerprints.get(&fh) {
+                            dup_target = Some(doc_id);
+                        } else if fp_len >= 128 {
+                            for (_, (h, len, doc_id)) in fingerprints.iter() {
+                                let max_len = fp_len.max(*len).max(1);
+                                if fp_len.abs_diff(*len) * 10 > max_len * 3 {
+                                    continue;
+                                }
+                                if crate::blacklist::hamming(fp, *h) <= 6 {
+                                    dup_target = Some(*doc_id);
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(doc_id) = dup_target {
+                            docs[doc_id].dup_count += 1;
+                            deduped += 1;
+                            if let Some(st) = progress {
+                                st.lock().unwrap().dup = deduped;
+                            }
+                            continue;
+                        }
+                        // 建文档(每页一条)
+                        let title = extract_title(page_html).unwrap_or_else(|| domain.clone());
+                        let description = extract_meta(page_html, "description").unwrap_or_default();
+                        let keywords = extract_keywords(page_html);
+                        let url = if rel.is_empty() {
+                            format!("http://{}/", domain)
+                        } else {
+                            format!("http://{}/{}", domain, rel)
+                        };
+                        docs.push(DocMeta {
+                            domain: domain.clone(),
+                            title,
+                            description,
+                            keywords: keywords.clone(),
+                            url: url.clone(),
+                            dup_count: 1,
+                        });
+                        fingerprints.insert(fh, (fp, fp_len, docs.len() - 1));
+                        // 外链发现(爬虫种子)
+                        for link in crate::crawler::extract_links(page_html, &url) {
+                            if let Some(d) = crate::crawler::domain_of(&link) {
+                                if d != domain {
+                                    discovered.insert(d);
+                                }
+                            }
+                        }
+                        // 进度 + 实时日志(什么网站、什么页面、什么关键词)
+                        if let Some(st) = progress {
+                            let mut s = st.lock().unwrap();
+                            s.keywords = keywords.clone();
+                            drop(s);
+                        }
+                        let kw_str = if keywords.is_empty() { "无".to_string() } else { keywords.join("、") };
+                        crate::logger::push(format!("[index] 页面 {}/{}: 关键词[{}]", domain, rel, kw_str));
+                    }
+                    continue; // crawled 站已页面级处理完
+                }
                 let html_path = dir.join("index.html");
                 if !html_path.exists() {
                     continue;
@@ -601,12 +675,13 @@ pub fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-/// 从 HTML 提取 <title>
+/// 从 HTML 提取 <title>(全 lower 提取,索引自洽:to_lowercase 变长 Unicode 如 İ
+/// 会导致 lower 索引与 html 错位 panic;标题小写化,中文不受影响)
 fn extract_title(html: &str) -> Option<String> {
     let lower = html.to_lowercase();
     let start = lower.find("<title>")? + 7;
     let end = lower[start..].find("</title>")? + start;
-    Some(html[start..end].trim().to_string())
+    Some(lower[start..end].trim().to_string())
 }
 
 /// 提取 meta 标签(content 属性),name 大小写不敏感
@@ -625,7 +700,8 @@ fn extract_meta(html: &str, name: &str) -> Option<String> {
                 if let Some(ci) = tag.find("content=\"") {
                     let cs = ci + 9;
                     let ce = tag[cs..].find('"').map(|e| cs + e).unwrap_or(tag.len());
-                    return Some(html[tag_start + cs..tag_start + ce].trim().to_string());
+                    // tag 是 lower 子串,索引自洽(全 lower 提取,避免变长 Unicode 错位)
+                    return Some(tag[cs..ce].trim().to_string());
                 }
             }
         }
@@ -731,7 +807,8 @@ pub fn extract_sitemap_locs(xml: &str) -> Vec<String> {
         let start = pos + rel + 5;
         if let Some(end_rel) = lower[start..].find("</loc>") {
             let end = start + end_rel;
-            let loc = xml[start..end].trim().to_string();
+            // 全 lower 提取(索引自洽;URL 小写无害)
+            let loc = lower[start..end].trim().to_string();
             if !loc.is_empty() {
                 out.push(loc);
             }
@@ -802,6 +879,24 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_title_meta_no_panic_unicode() {
+        // İ (U+0130) 小写化变长:旧代码 lower 索引切 html panic
+        let html = "<html><head><title>İSTANBUL 中文站</title><meta name=\"description\" content=\"移动互联网 İ 安全\"></head><body>x</body></html>";
+        // 全 lower 提取:标题小写化(İ→i̇ 带组合符),但绝不 panic
+        let t = extract_title(html).unwrap();
+        assert!(t.contains("stanbul") && t.contains("中文站"), "got: {}", t);
+        let d = extract_meta(html, "description").unwrap();
+        assert!(d.contains("移动互联网") && d.contains("安全"), "got: {}", d);
+    }
+
+    #[test]
+    fn sitemap_locs_no_panic_unicode() {
+        let xml = "<?xml version=\"1.0\"?><urlset><url><loc>https://İstanbul.com/page1</loc></url></urlset>";
+        let locs = extract_sitemap_locs(xml);
+        assert!(locs.iter().any(|l| l.contains("stanbul.com")), "got {:?}", locs);
+    }
 
     fn test_doc(i: usize) -> DocMeta {
         DocMeta {
