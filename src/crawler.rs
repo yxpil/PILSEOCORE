@@ -116,7 +116,7 @@ impl Crawler {
         self.favicons.lock().unwrap().get(domain).cloned()
     }
 
-    /// 抓取 favicon.ico 到内存缓存(懒加载,失败静默)
+    /// 抓取 favicon.ico 到内存缓存(懒加载,失败静默);http 失败自动试 https
     pub fn ensure_favicon(&self, domain: &str) {
         {
             let fav = self.favicons.lock().unwrap();
@@ -124,20 +124,33 @@ impl Crawler {
                 return;
             }
         }
+        let mut got: Option<Vec<u8>> = None;
         let url = format!("http://{}/favicon.ico", domain);
         if let Ok((200, body)) = http_get(&url, 3000, CRAWLER_UA) {
             if !body.is_empty() && body.len() <= 256 * 1024 {
-                let mut fav = self.favicons.lock().unwrap();
-                if fav.len() >= FAVICON_CACHE_MAX {
-                    // LRU 淘汰最旧
-                    let mut order = self.favicon_order.lock().unwrap();
-                    if let Some(old) = order.pop_front() {
-                        fav.remove(&old);
-                    }
-                }
-                fav.insert(domain.to_string(), body.into_bytes());
-                self.favicon_order.lock().unwrap().push_back(domain.to_string());
+                got = Some(body.into_bytes());
             }
+        }
+        if got.is_none() {
+            // https 兜底(https-only 站点)
+            let url2 = format!("https://{}/favicon.ico", domain);
+            if let Ok((200, body)) = http_get(&url2, 3000, CRAWLER_UA) {
+                if !body.is_empty() && body.len() <= 256 * 1024 {
+                    got = Some(body.into_bytes());
+                }
+            }
+        }
+        if let Some(bytes) = got {
+            let mut fav = self.favicons.lock().unwrap();
+            if fav.len() >= FAVICON_CACHE_MAX {
+                // LRU 淘汰最旧
+                let mut order = self.favicon_order.lock().unwrap();
+                if let Some(old) = order.pop_front() {
+                    fav.remove(&old);
+                }
+            }
+            fav.insert(domain.to_string(), bytes);
+            self.favicon_order.lock().unwrap().push_back(domain.to_string());
         }
     }
 
@@ -242,7 +255,8 @@ fn worker_loop(
                 return disallow_match(disallows, url);
             }
         }
-        let robots_url = format!("http://{}/robots.txt", domain);
+        let scheme = if url.starts_with("https://") { "https" } else { "http" };
+        let robots_url = format!("{}://{}/robots.txt", scheme, domain);
         let disallows = match http_get(&robots_url, timeout_ms, CRAWLER_UA) {
             Ok((200, body)) => parse_robots(&body),
             _ => Vec::new(),
@@ -251,27 +265,40 @@ fn worker_loop(
         disallow_match(&disallows, url)
     }
 
-    // favicon 懒加载(与 Crawler::ensure_favicon 一致)
-    fn ensure_fav(domain: &str, favicons: &Arc<Mutex<HashMap<String, Vec<u8>>>>, favicon_order: &Arc<Mutex<VecDeque<String>>>) {
+    // favicon 懒加载(与 Crawler::ensure_favicon 一致);按页面协议抓取,http 失败试 https
+    fn ensure_fav(domain: &str, scheme: &str, favicons: &Arc<Mutex<HashMap<String, Vec<u8>>>>, favicon_order: &Arc<Mutex<VecDeque<String>>>) {
         {
             let fav = favicons.lock().unwrap();
             if fav.contains_key(domain) {
                 return;
             }
         }
-        let url = format!("http://{}/favicon.ico", domain);
+        let mut got: Option<Vec<u8>> = None;
+        let url = format!("{}://{}/favicon.ico", scheme, domain);
         if let Ok((200, body)) = http_get(&url, 3000, CRAWLER_UA) {
             if !body.is_empty() && body.len() <= 256 * 1024 {
-                let mut fav = favicons.lock().unwrap();
-                if fav.len() >= FAVICON_CACHE_MAX {
-                    let mut order = favicon_order.lock().unwrap();
-                    if let Some(old) = order.pop_front() {
-                        fav.remove(&old);
-                    }
-                }
-                fav.insert(domain.to_string(), body.into_bytes());
-                favicon_order.lock().unwrap().push_back(domain.to_string());
+                got = Some(body.into_bytes());
             }
+        }
+        if got.is_none() && scheme == "http" {
+            // https 兜底(https-only 站点)
+            let url2 = format!("https://{}/favicon.ico", domain);
+            if let Ok((200, body)) = http_get(&url2, 3000, CRAWLER_UA) {
+                if !body.is_empty() && body.len() <= 256 * 1024 {
+                    got = Some(body.into_bytes());
+                }
+            }
+        }
+        if let Some(bytes) = got {
+            let mut fav = favicons.lock().unwrap();
+            if fav.len() >= FAVICON_CACHE_MAX {
+                let mut order = favicon_order.lock().unwrap();
+                if let Some(old) = order.pop_front() {
+                    fav.remove(&old);
+                }
+            }
+            fav.insert(domain.to_string(), bytes);
+            favicon_order.lock().unwrap().push_back(domain.to_string());
         }
     }
 
@@ -333,11 +360,25 @@ fn worker_loop(
                 Err(_) => {}
             }
         }
+        // http 全部 UA 失败(连接失败/超时)→ 站点可能只支持 https:单 UA 试一次 https
+        let mut effective_url = url.clone();
+        if best_html.is_none() && redirect_info.is_none() && url.starts_with("http://") {
+            let https_url = format!("https://{}", &url["http://".len()..]);
+            if let Ok((status, headers, html)) = http_get_full(&https_url, timeout_ms, CRAWLER_UAS[0]) {
+                if status == 200 {
+                    best_html = Some(html);
+                } else if (301..=308).contains(&status) {
+                    redirect_info = Some((status, headers));
+                    effective_url = https_url;
+                }
+            }
+        }
         if let Some(html) = best_html {
             let _ = save_page(&url, &html, out_dir);
             stats.lock().unwrap().fetched += 1;
             // favicon 内存缓存(懒加载)
-            ensure_fav(&domain, &favicons, &favicon_order);
+            let scheme = if url.starts_with("https://") { "https" } else { "http" };
+            ensure_fav(&domain, scheme, &favicons, &favicon_order);
             // 链式发现链接(友链的友链继续解析):合并全部 UA 响应中发现的链接(去重),
             // 面板日志:XX 发现 YY 链接
             if depth < max_depth {
@@ -376,8 +417,8 @@ fn worker_loop(
             let loc = headers.iter().find(|(k, _)| k == "location").map(|(_, v)| v.clone());
             match loc {
                 Some(target) => {
-                    let next = resolve_redirect_url(&url, &target);
-                    if next.starts_with("http://") {
+                    let next = resolve_redirect_url(&effective_url, &target);
+                    if next.starts_with("http://") || next.starts_with("https://") {
                         let mut v = visited.lock().unwrap();
                         if !v.contains(&next) {
                             v.insert(next.clone());
@@ -458,18 +499,25 @@ fn resolve_redirect_url(base: &str, target: &str) -> String {
         return format!("http://{}", rest);
     }
     if t.starts_with('/') {
-        // 根相对路径
+        // 根相对路径:保持 base 的协议(http/https)
+        let scheme = if base.starts_with("https://") { "https://" } else { "http://" };
         let host = base.split('/').nth(2).unwrap_or("");
-        return format!("http://{}{}", host, t);
+        return format!("{}{}{}", scheme, host, t);
     }
     // 当前路径相对
     let idx = base.rfind('/').unwrap_or(base.len());
     format!("{}/{}", &base[..idx], t)
 }
 
-/// 域名(含端口,如 "example.com" / "127.0.0.1:8912")
+/// 域名(含端口,如 "example.com" / "127.0.0.1:8912");http/https 均支持
 pub fn domain_of(url: &str) -> Option<String> {
-    let rest = url.strip_prefix("http://")?;
+    let rest = if let Some(r) = url.strip_prefix("http://") {
+        r
+    } else if let Some(r) = url.strip_prefix("https://") {
+        r
+    } else {
+        return None;
+    };
     let hostport = rest.split('/').next()?;
     if hostport.is_empty() {
         return None;
@@ -477,23 +525,20 @@ pub fn domain_of(url: &str) -> Option<String> {
     Some(hostport.to_lowercase())
 }
 
-/// URL 规范化:http 降级、去 fragment、host 小写
+/// URL 规范化:去 fragment、host 小写;https 保留(现在走 curl 可抓取)
 fn normalize_url(url: &str) -> Option<String> {
     let mut u = url.trim().to_string();
     let lower_u = u.to_lowercase();
-    if lower_u.starts_with("https://") {
-        // 用 u 自身的 find 索引切 u(to_lowercase 可能改变字节长度,索引会错位)
-        if let Some(i) = u.find("://") {
-            u = format!("http://{}", &u[i + 3..]);
-        }
-    }
-    if !u.starts_with("http://") {
+    let is_https = lower_u.starts_with("https://");
+    if !lower_u.starts_with("http://") && !is_https {
         return None;
     }
     if let Some(i) = u.find('#') {
         u.truncate(i);
     }
-    let rest = &u["http://".len()..];
+    // scheme 前缀为 ASCII 定长(7/8 字节),大小写不影响长度,切片安全
+    let scheme_len = if is_https { 8 } else { 7 };
+    let rest = &u[scheme_len..];
     let (hostport, path) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
@@ -503,7 +548,8 @@ fn normalize_url(url: &str) -> Option<String> {
         return None;
     }
     let path_clean = if path == "/" { "/" } else { path };
-    Some(format!("http://{}{}", host_lower, path_clean))
+    let scheme = if is_https { "https://" } else { "http://" };
+    Some(format!("{}{}{}", scheme, host_lower, path_clean))
 }
 
 /// 相对 URL 解析
@@ -673,16 +719,16 @@ mod tests {
 
     #[test]
     fn normalize_url_https_downgrade_unicode_path() {
-        // https 降级 + 非 ASCII 路径:索引错位旧代码 panic
+        // https 保留(走 curl 可抓取)+ 非 ASCII 路径:索引错位旧代码 panic
         let u = normalize_url("HTTPS://EXAMPLE.COM/中文路径?q=İstanbul");
         assert!(u.is_some());
         let u = u.unwrap();
-        assert!(u.starts_with("http://example.com/"), "got {}", u);
+        assert!(u.starts_with("https://example.com/"), "got {}", u);
     }
 
     #[test]
     fn normalize_and_resolve() {
-        assert_eq!(normalize_url("HTTPS://Example.com/#top").unwrap(), "http://example.com/");
+        assert_eq!(normalize_url("HTTPS://Example.com/#top").unwrap(), "https://example.com/");
         assert_eq!(normalize_url("http://a.com/path").unwrap(), "http://a.com/path");
         assert!(normalize_url("ftp://x.com").is_none());
         assert_eq!(resolve_url("http://a.com/", "/b.html").unwrap(), "http://a.com/b.html");

@@ -14,7 +14,7 @@ use std::time::Duration;
 pub const FAVICON_PLACEHOLDER: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#1a73e8"/><text x="16" y="22" font-size="16" font-family="Arial" font-weight="bold" fill="#fff" text-anchor="middle">P</text></svg>"##;
 
 /// HTTP 客户端:GET 请求,返回 (状态码, 响应体)。
-/// 仅支持 http:// 明文(零依赖无 TLS);https 站点跳过
+/// http:// 用内置明文客户端;https:// 走系统 curl(Windows 自带,零第三方依赖)
 pub fn http_get(url: &str, timeout_ms: u64, ua: &str) -> Result<(u16, String), String> {
     let (status, _, body) = http_get_full(url, timeout_ms, ua)?;
     Ok((status, body))
@@ -22,9 +22,12 @@ pub fn http_get(url: &str, timeout_ms: u64, ua: &str) -> Result<(u16, String), S
 
 /// HTTP 客户端:GET 请求,返回 (状态码, 响应头(location 等), 响应体)
 pub fn http_get_full(url: &str, timeout_ms: u64, ua: &str) -> Result<(u16, Vec<(String, String)>, String), String> {
+    if url.starts_with("https://") {
+        return curl_get_full(url, timeout_ms, ua);
+    }
     let rest = url
         .strip_prefix("http://")
-        .ok_or_else(|| format!("仅支持 http:// 明文地址: {}", url))?;
+        .ok_or_else(|| format!("不支持的地址(仅 http/https): {}", url))?;
     let (hostport, path) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
@@ -118,6 +121,48 @@ pub fn http_get_full(url: &str, timeout_ms: u64, ua: &str) -> Result<(u16, Vec<(
         }
     }
     Ok((status, headers, String::from_utf8_lossy(&body).into_owned()))
+}
+
+/// https 客户端:调用系统 curl(Windows 10+ 自带,零第三方依赖),
+/// -k 忽略证书验证(爬虫抓取公开内容,避免自签/过期证书拦截);
+/// 临时文件在 %TEMP%,用完即删(内存优先,不落盘)
+fn curl_get_full(url: &str, timeout_ms: u64, ua: &str) -> Result<(u16, Vec<(String, String)>, String), String> {
+    let tag = format!("pilseo_curl_{}_{}", std::process::id(), url.len());
+    let hf = std::env::temp_dir().join(format!("{}.h", tag));
+    let bf = std::env::temp_dir().join(format!("{}.b", tag));
+    let secs = (timeout_ms / 1000).max(1).to_string();
+    let out = std::process::Command::new("curl")
+        .args(["-s", "-k", "--max-time"])
+        .arg(&secs)
+        .args(["-A", ua, "-D"])
+        .arg(&hf)
+        .args(["-o"])
+        .arg(&bf)
+        .args(["-w", "%{http_code}"])
+        .arg(url)
+        .output()
+        .map_err(|e| format!("调用 curl 失败(https 需系统自带 curl): {}", e))?;
+    let code: u16 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0);
+    let body = std::fs::read(&bf)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    let mut headers: Vec<(String, String)> = Vec::new();
+    if let Ok(h) = std::fs::read_to_string(&hf) {
+        for line in h.lines() {
+            if let Some(vi) = line.find(':') {
+                let key = &line[..vi];
+                if key.eq_ignore_ascii_case("location") {
+                    headers.push(("location".to_string(), line[vi + 1..].trim().to_string()));
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&hf);
+    let _ = std::fs::remove_file(&bf);
+    if code == 0 {
+        return Err(format!("curl 请求失败: {}", url));
+    }
+    Ok((code, headers, body))
 }
 
 #[derive(Clone, Debug)]
