@@ -214,6 +214,27 @@ pub fn save_admin_show(visible: bool) -> Result<(), String> {
     fs::write(path, lines.join("\n") + "\n").map_err(|e| format!("写入配置失败: {}", e))
 }
 
+/// 聚合搜索代理(engine.conf meta_proxy,如 127.0.0.1:7890;空=直连)。
+/// 谷歌等被墙引擎在 Clash 开启时经代理可达。
+pub fn meta_proxy() -> String {
+    std::fs::read_to_string("config/engine.conf")
+        .map(|t| {
+            for line in t.lines() {
+                let line = line.trim();
+                if line.starts_with('#') || line.is_empty() {
+                    continue;
+                }
+                if let Some(eq) = line.find('=') {
+                    if line[..eq].trim() == "meta_proxy" {
+                        return line[eq + 1..].trim().to_string();
+                    }
+                }
+            }
+            String::new()
+        })
+        .unwrap_or_default()
+}
+
 fn parse_bool(s: &str) -> Result<bool, ()> {
     match s.trim().to_lowercase().as_str() {
         "true" | "1" | "yes" | "on" => Ok(true),

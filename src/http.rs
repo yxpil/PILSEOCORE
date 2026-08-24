@@ -174,16 +174,22 @@ fn curl_get_full(url: &str, timeout_ms: u64, ua: &str) -> Result<(u16, Vec<(Stri
     let hf = std::env::temp_dir().join(format!("{}.h", tag));
     let bf = std::env::temp_dir().join(format!("{}.b", tag));
     let secs = (timeout_ms / 1000).max(1).to_string();
-    let out = std::process::Command::new("curl")
-        .args(["-s", "-k", "--max-time"])
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args(["-s", "-k", "--max-time"])
         .arg(&secs)
         .args(["-A", ua, "-D"])
         .arg(&hf)
         .args(["-o"])
         .arg(&bf)
-        .args(["-w", "%{http_code}"])
-        .arg(url)
-        .output()
+        .args(["-w", "%{http_code}"]);
+    // 代理支持(engine.conf meta_proxy,如 127.0.0.1:7890;空=直连):
+    // 谷歌等被墙引擎在 Clash 开启时经代理可达
+    let proxy = crate::config::meta_proxy();
+    if !proxy.is_empty() {
+        cmd.args(["-x", &proxy]);
+    }
+    cmd.arg(url);
+    let out = cmd.output()
         .map_err(|e| format!("调用 curl 失败(https 需系统自带 curl): {}", e))?;
     let code: u16 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0);
     let body = std::fs::read(&bf)

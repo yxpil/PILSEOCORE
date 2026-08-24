@@ -24,44 +24,49 @@ pub struct MetaProvider {
 }
 
 /// 内置聚合引擎(顺序即优先级):必应 / 百度 / 360搜索 / 搜狗 / 谷歌 / 中国搜索
+/// url 模板:{q}=查询词,{p}=翻页参数(必应 first=1/11/21;百度 pn=0/10/20;
+/// 360 pn=1/2/3;搜狗 WAP page=1/2/3;谷歌 start=0/10/20;中国搜索 JS 渲染通常失败)
 pub const PROVIDERS: &[MetaProvider] = &[
     MetaProvider {
         id: "bing",
         name: "必应",
-        url: "https://www.bing.com/search?q={q}&mkt=zh-CN&count=10",
+        url: "https://www.bing.com/search?q={q}&mkt=zh-CN&count=10&first={p}",
         noise: &["bing.com/search", "bing.com/images", "bing.com/videos", "go.microsoft.com"],
     },
     MetaProvider {
         id: "baidu",
         name: "百度",
-        url: "https://www.baidu.com/s?wd={q}&rn=10",
+        url: "https://www.baidu.com/s?wd={q}&rn=10&pn={p}",
         noise: &["baidu.com/s?", "baidu.com/sug", "baidu.com/cse", "top.baidu.com"],
     },
     MetaProvider {
         id: "so360",
         name: "360搜索",
-        url: "https://www.so.com/s?q={q}",
+        url: "https://www.so.com/s?q={q}&pn={p}",
         noise: &["so.com/s?", "so.com/so", "360.cn", "zhushou.360.cn"],
     },
     MetaProvider {
         id: "sogou",
         name: "搜狗",
-        url: "https://www.sogou.com/web?query={q}",
+        url: "https://wap.sogou.com/web/searchList.jsp?keyword={q}&page={p}",
         noise: &["sogou.com/web?", "sogou.com/sogou", "sogou.com/s?query"],
     },
     MetaProvider {
         id: "google",
         name: "谷歌",
-        url: "https://www.google.com/search?q={q}&hl=zh-CN&num=10",
+        url: "https://www.google.com/search?q={q}&hl=zh-CN&num=10&start={p}",
         noise: &["google.com/search", "google.com/maps", "google.com/images", "support.google.com"],
     },
     MetaProvider {
         id: "chinaso",
         name: "中国搜索",
-        url: "https://www.chinaso.com/newssearch/all?q={q}",
+        url: "https://www.chinaso.com/newssearch/all?q={q}&page={p}",
         noise: &["chinaso.com/newssearch", "chinaso.com/so", "chinaso.com/search"],
     },
 ];
+
+/// 每个引擎抓取页数(翻页收录,不只第一页;串行抓取,页间 300ms 间隔降反爬)
+const META_PAGES: usize = 3;
 
 /// 启停配置文件:data/metasearch.conf(每行 id=1/0;缺省=启用)
 pub fn config_path() -> std::path::PathBuf {
@@ -396,10 +401,13 @@ pub fn search_cached(q: &str) -> (Vec<MetaResult>, bool) {
 }
 
 /// 并发抓取全部启用的引擎 + 自定义引擎(每引擎独立线程,互不影响;
-/// 整体耗时 ≈ 最慢引擎的超时)。用浏览器 UA(聚合搜索 = 代替用户搜索,
-/// 非爬站点;带爬虫后缀会被引擎拦截)
+/// 每引擎翻页抓取 META_PAGES 页,不只第一页)。用浏览器 UA(聚合搜索 =
+/// 代替用户搜索,非爬站点;带爬虫后缀会被引擎拦截)
 pub fn search_live(q: &str) -> Vec<MetaResult> {
     const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+    const PAGE_PARAMS: [&str; 3] = ["1", "11", "21"];
+    const BAIDU_PARAMS: [&str; 3] = ["0", "10", "20"];
+    const PLAIN_PARAMS: [&str; 3] = ["1", "2", "3"];
     let q_owned = q.to_string();
     let mut handles = Vec::new();
     // 内置引擎(按启停配置过滤)
@@ -408,56 +416,86 @@ pub fn search_live(q: &str) -> Vec<MetaResult> {
             continue;
         }
         let qq = q_owned.clone();
-        let url = p.url.replace("{q}", &urlencode(&qq));
+        // 翻页参数:必应用 first=1/11/21,百度/谷歌用 0/10/20,其余 1/2/3
+        let params: &[&str; 3] = match p.id {
+            "bing" => &PAGE_PARAMS,
+            "baidu" | "google" => &BAIDU_PARAMS,
+            _ => &PLAIN_PARAMS,
+        };
         handles.push(std::thread::spawn(move || {
-            // 跟随重定向(必应等返回 302,最多 3 跳)
-            let mut cur_url = url.clone();
-            for _ in 0..3 {
-                match crate::http::http_get_full(&cur_url, 6000, BROWSER_UA) {
-                    Ok((300..=399, headers, _)) => {
-                        let Some(loc) = headers.iter().find(|(k, _)| k == "location").map(|(_, v)| v.clone()) else {
-                            return Vec::new();
-                        };
-                        cur_url = crate::crawler::resolve_redirect_url(&cur_url, &loc);
+            let mut out = Vec::new();
+            for pi in 0..META_PAGES {
+                let url = p
+                    .url
+                    .replace("{q}", &urlencode(&qq))
+                    .replace("{p}", params[pi]);
+                // 跟随重定向(必应等返回 302,最多 3 跳)
+                let mut cur_url = url.clone();
+                for _ in 0..3 {
+                    match crate::http::http_get_full(&cur_url, 6000, BROWSER_UA) {
+                        Ok((300..=399, headers, _)) => {
+                            let Some(loc) = headers.iter().find(|(k, _)| k == "location").map(|(_, v)| v.clone()) else {
+                                break;
+                            };
+                            cur_url = crate::crawler::resolve_redirect_url(&cur_url, &loc);
+                        }
+                        Ok((200, _, html)) => {
+                            out.extend(parse(&html, p));
+                            break;
+                        }
+                        _ => break,
                     }
-                    Ok((200, _, html)) => return parse(&html, p),
-                    _ => return Vec::new(),
+                }
+                // 页间间隔,降低反爬概率
+                if pi + 1 < META_PAGES {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
                 }
             }
-            Vec::new()
+            out
         }));
     }
-    // 自定义引擎(名称 + URL 模板,通用解析;URL 模板 {q} 占位)
+    // 自定义引擎(名称 + URL 模板,通用解析;URL 模板 {q} 占位,{p} 翻页)
     for (name, tmpl) in custom_providers() {
         let qq = q_owned.clone();
-        let url = tmpl.replace("{q}", &urlencode(&qq));
         let provider = MetaProvider { id: "custom", name: Box::leak(name.into_boxed_str()), url: Box::leak(tmpl.into_boxed_str()), noise: &[] };
         handles.push(std::thread::spawn(move || {
-            // 跟随重定向(最多 3 跳)
-            let mut cur_url = url.clone();
-            for _ in 0..3 {
-                match crate::http::http_get_full(&cur_url, 6000, BROWSER_UA) {
-                    Ok((300..=399, headers, _)) => {
-                        let Some(loc) = headers.iter().find(|(k, _)| k == "location").map(|(_, v)| v.clone()) else {
-                            return Vec::new();
-                        };
-                        cur_url = crate::crawler::resolve_redirect_url(&cur_url, &loc);
+            let mut out = Vec::new();
+            for pi in 0..META_PAGES {
+                let url = provider
+                    .url
+                    .replace("{q}", &urlencode(&qq))
+                    .replace("{p}", &format!("{}", pi + 1));
+                let mut cur_url = url.clone();
+                for _ in 0..3 {
+                    match crate::http::http_get_full(&cur_url, 6000, BROWSER_UA) {
+                        Ok((300..=399, headers, _)) => {
+                            let Some(loc) = headers.iter().find(|(k, _)| k == "location").map(|(_, v)| v.clone()) else {
+                                break;
+                            };
+                            cur_url = crate::crawler::resolve_redirect_url(&cur_url, &loc);
+                        }
+                        Ok((200, _, html)) => {
+                            out.extend(parse(&html, &provider));
+                            break;
+                        }
+                        _ => break,
                     }
-                    Ok((200, _, html)) => return parse(&html, &provider),
-                    _ => return Vec::new(),
+                }
+                if pi + 1 < META_PAGES {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
                 }
             }
-            Vec::new()
+            out
         }));
     }
     let mut all: Vec<MetaResult> = Vec::new();
     for h in handles {
         all.extend(h.join().unwrap_or_default());
     }
-    // 全局 url 去重 + 截断 20 条
+    // 全局 url 去重(跨页/跨引擎)+ 截断 60 条(翻页收录更多,分页展示)
     let mut seen = std::collections::HashSet::new();
     all.retain(|r| seen.insert(r.url.clone()));
-    all.truncate(20);
+    all.truncate(60);
     all
 }
 
