@@ -82,6 +82,14 @@
   .ai-box .ai-err { color:var(--red); font-size:13px; margin-top:6px; }
 
   .empty { color:var(--gray); text-align:center; margin-top:80px; font-size:15px; }
+  /* 加载动画(搜索/聚合等待,不让用户无聊) */
+  #loading { text-align:center; padding:90px 0 50px; }
+  .spinner { width:38px; height:38px; border:4px solid var(--line); border-top-color:var(--blue); border-radius:50%; margin:0 auto 18px; animation:spin .8s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .loading-text { color:var(--text); font-size:15px; }
+  .loading-sub { color:var(--gray); font-size:13px; margin-top:8px; line-height:1.7; }
+  .loading-dots::after { content:''; animation:dots 1.2s steps(4,end) infinite; }
+  @keyframes dots { 0%{content:''} 25%{content:'.'} 50%{content:'..'} 75%{content:'...'} 100%{content:'....'} }
   .pager { display:flex; align-items:center; gap:6px; justify-content:center; margin:30px 0 10px; flex-wrap:wrap; }
   .pg { display:inline-block; min-width:38px; padding:9px 12px; border-radius:10px; font-size:14px; color:var(--blue); cursor:pointer; text-align:center; border:1px solid transparent; user-select:none; }
   .pg:hover { background:var(--hover); }
@@ -161,6 +169,11 @@
 </div>
 
 <!-- 结果 -->
+<div id="loading" style="display:none">
+  <div class="spinner"></div>
+  <div class="loading-text loading-dots" id="loadingText">正在搜索本地索引</div>
+  <div class="loading-sub" id="loadingSub">本地无结果时自动借用必应/百度/360搜索/搜狗/谷歌/中国搜索,最多约 10 秒</div>
+</div>
 <div id="results" style="display:none"></div>
 <footer id="foot" style="display:none">
   <div><span id="footName">PILSEOCORE</span> 本地搜索引擎 · 域名穷举 · 自动建站 · 本地索引</div>
@@ -258,10 +271,20 @@ function doSearch(q, useAi, page, metaPage) {
   topbar.style.display = 'flex';
   document.getElementById('topq').value = q;
   hidePanel();
+  // 加载动画:搜索/聚合等待提示,不让用户觉得单调
+  var ld = document.getElementById('loading');
+  if (ld) {
+    document.getElementById('loadingText').textContent = '正在搜索本地索引';
+    document.getElementById('loadingSub').textContent = '本地无结果时自动借用必应/百度/360搜索/搜狗/谷歌/中国搜索,最多约 10 秒';
+    ld.style.display = 'block';
+    resultsBox.style.display = 'none';
+  }
   fetch(url).then(function(r){ return r.json(); }).then(function(d){
+    if (ld) ld.style.display = 'none';
     render(d, q, page, metaPage);
     history.pushState({}, '', '/search?q=' + encodeURIComponent(q) + '&page=' + page + '&meta_page=' + metaPage);
   }).catch(function(e){
+    if (ld) ld.style.display = 'none';
     resultsBox.innerHTML = '<div class="empty">请求失败:' + e + '</div>';
     resultsBox.style.display = 'block';
     foot.style.display = 'block';

@@ -267,6 +267,7 @@ fn cmd_serve(args: &[String]) -> Result<(), String> {
     ));
     println!("[tasks] 定时任务调度线程运行中(管理后台'定时任务'可添加)");
     server::spawn_scheduler(&ctx);
+    server::spawn_meta_ingest(&ctx);
     logger::init();
     logger::push(format!("[serve] 服务已启动: http://127.0.0.1:{}(端口 8896 固定)", port));
     let addr = format!("127.0.0.1:{}", port);

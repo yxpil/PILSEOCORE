@@ -1,4 +1,4 @@
-﻿//! 聚合搜索(元搜索):本地索引搜不到时,借助外部搜索引擎
+//! 聚合搜索(元搜索):本地索引搜不到时,借助外部搜索引擎
 //! (必应/百度/360搜索/搜狗/谷歌/中国搜索),结果缓存到本地引擎。
 //! 纯 Rust 标准库,零第三方依赖;https 抓取走系统 curl。
 
@@ -256,8 +256,10 @@ fn is_ad(title: &str) -> bool {
 }
 
 /// 通用结果解析:提取 <h2>/<h3> 内的 <a href> 作为搜索结果(主流引擎均用 h2/h3 包裹标题),
-/// 排除引擎自身功能链接;标题块后取摘要文本(去标签截断)
-fn parse(html: &str, provider: &MetaProvider) -> Vec<MetaResult> {
+/// 排除引擎自身功能链接;标题块后取摘要文本(去标签截断)。
+/// base_url = 实际抓取页 URL:搜狗等引擎返回相对路径链接(如 /link?url=...),
+/// 必须基于 base 补齐为绝对 URL,否则点击 404(404 的就是我们)
+fn parse(html: &str, provider: &MetaProvider, base_url: &str) -> Vec<MetaResult> {
     let mut out: Vec<MetaResult> = Vec::new();
     let mut pos = 0usize;
     while out.len() < 10 && pos < html.len() {
@@ -291,11 +293,14 @@ fn parse(html: &str, provider: &MetaProvider) -> Vec<MetaResult> {
                 // 排除引擎自身功能链接
                 let noise_hit = provider.noise.iter().any(|n| raw_url.contains(n));
                 if !noise_hit {
-                    // 相对协议补全
-                    let url = if raw_url.starts_with("//") {
+                    // 相对路径补齐:绝对 URL 直接用;协议相对(//)补 https;其余相对路径
+                    // (搜狗 WAP 的 /link?url=... 等)基于抓取页 base_url 拼接,否则点击 404
+                    let url = if raw_url.starts_with("http://") || raw_url.starts_with("https://") {
+                        raw_url.to_string()
+                    } else if raw_url.starts_with("//") {
                         format!("https:{}", raw_url)
                     } else {
-                        raw_url.to_string()
+                        crate::crawler::resolve_redirect_url(base_url, raw_url)
                     };
                     // 标题:a 标签结束(第一个 >)后的文本直到 </a>(href 后可能还有其他属性)
                     // 注意:find('>') 返回相对 he 的偏移,map 已换算成 block 内绝对位置
@@ -440,7 +445,7 @@ pub fn search_live(q: &str) -> Vec<MetaResult> {
                             cur_url = crate::crawler::resolve_redirect_url(&cur_url, &loc);
                         }
                         Ok((200, _, html)) => {
-                            out.extend(parse(&html, p));
+                            out.extend(parse(&html, p, &cur_url));
                             break;
                         }
                         _ => break,
@@ -475,7 +480,7 @@ pub fn search_live(q: &str) -> Vec<MetaResult> {
                             cur_url = crate::crawler::resolve_redirect_url(&cur_url, &loc);
                         }
                         Ok((200, _, html)) => {
-                            out.extend(parse(&html, &provider));
+                            out.extend(parse(&html, &provider, &cur_url));
                             break;
                         }
                         _ => break,
@@ -499,12 +504,66 @@ pub fn search_live(q: &str) -> Vec<MetaResult> {
     all
 }
 
+/// 引擎跳转链接特征(搜狗 /link、百度 /link、必应 /ck/ 等):跳转页无正文,不收录
+const JUMP_MARKERS: &[&str] = &["sogou.com/link", "baidu.com/link", "bing.com/ck/", "so.com/link"];
+
+/// 聚合结果自动编入引擎:URL 写入待收录队列(data/meta_ingest.txt,去重追加)。
+/// 后台 ingest 线程抓取页面存入 out/crawled,下次索引重建自动收录(页面级收录)
+pub fn enqueue_ingest(results: &[MetaResult]) -> usize {
+    if results.is_empty() {
+        return 0;
+    }
+    let path = crate::config::index_dir().join("meta_ingest.txt");
+    let mut existing: std::collections::HashSet<String> = std::fs::read_to_string(&path)
+        .map(|t| t.lines().map(|l| l.trim().to_string()).collect())
+        .unwrap_or_default();
+    let mut added = 0usize;
+    let mut lines = String::new();
+    for r in results {
+        // 跳转页不收录(无正文);去重追加
+        if r.url.is_empty() || JUMP_MARKERS.iter().any(|m| r.url.contains(m)) {
+            continue;
+        }
+        if existing.insert(r.url.clone()) {
+            lines.push_str(&r.url);
+            lines.push('\n');
+            added += 1;
+        }
+    }
+    if added > 0 {
+        let _ = std::fs::create_dir_all(crate::config::index_dir());
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = f.write_all(lines.as_bytes());
+        }
+    }
+    added
+}
+
 /// 聚合缓存统计(空实现占位,供面板后续使用)
 pub static CACHE_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relative_url_filled_from_base() {
+        // 搜狗 WAP 风格:结果链接是相对路径 /link?url=... 必须基于抓取页补齐,否则 404
+        let html = r#"<h3><a href="/link?url=aHR0cHM6">相对路径结果</a></h3>"#;
+        let provider = MetaProvider { id: "sogou", name: "搜狗", url: "https://wap.sogou.com/web/searchList.jsp?keyword={q}&page={p}", noise: &[] };
+        let res = parse(html, &provider, "https://wap.sogou.com/web/searchList.jsp?keyword=test&page=1");
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].url, "https://wap.sogou.com/link?url=aHR0cHM6");
+        // 绝对 URL 原样保留
+        let html2 = r#"<h3><a href="https://example.com/x">绝对结果</a></h3>"#;
+        let res2 = parse(html2, &provider, "https://wap.sogou.com/web/searchList.jsp?keyword=test&page=1");
+        assert_eq!(res2[0].url, "https://example.com/x");
+        // 协议相对补 https
+        let html3 = r#"<h3><a href="//cdn.example.com/y">协议相对</a></h3>"#;
+        let res3 = parse(html3, &provider, "https://wap.sogou.com/web/searchList.jsp?keyword=test&page=1");
+        assert_eq!(res3[0].url, "https://cdn.example.com/y");
+    }
 
     #[test]
     fn decode_entities_works() {
@@ -541,7 +600,7 @@ mod tests {
         <li><h3><a href="javascript:void(0)" class="btn">刷新</a></h3></li>
         <li><h3><a href="https://bad.com" class="x">ss="残留"垃圾标题</a></h3></li></ol>"#;
         let p = MetaProvider { id: "test", name: "测试", url: "", noise: &["bing.com/search"] };
-        let res = parse(html, &p);
+        let res = parse(html, &p, "https://example.com/search");
         assert!(res.iter().any(|r| r.title == "量子纠缠 百科" && r.url == "https://example.com/a"), "got: {:?}", res.iter().map(|r| (&r.title, &r.url)).collect::<Vec<_>>());
         assert!(!res.iter().any(|r| r.title.contains("刷新") || r.title.contains("垃圾")), "got: {:?}", res.iter().map(|r| &r.title).collect::<Vec<_>>());
     }
@@ -551,7 +610,7 @@ mod tests {
         // 变长 Unicode(İ)与中文混排:切片安全,不 panic
         let html = "<h2><a href=\"https://x.com/1\">İSTANBUL 中文标题</a></h2><h3><a href=\"https://y.com/2\">第二个</a></h3>";
         let p = MetaProvider { id: "test", name: "测试", url: "", noise: &[] };
-        let res = parse(html, &p);
+        let res = parse(html, &p, "https://example.com/search");
         assert!(res.len() >= 1);
     }
 }

@@ -69,6 +69,8 @@
 
   .bar-wrap { background:#f1f3f4; border-radius:8px; height:8px; overflow:hidden; margin:10px 0 6px; }
   .bar { background:var(--blue); height:100%; width:0; transition:width .3s; border-radius:8px; }
+  .spinner-sm { width:14px; height:14px; border:2px solid var(--line); border-top-color:var(--blue); border-radius:50%; display:inline-block; vertical-align:-2px; animation:spinSm .8s linear infinite; }
+  @keyframes spinSm { to { transform:rotate(360deg); } }
   .state-line { font-size:13px; color:var(--gray); }
 
   .kv { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:12px; }
@@ -610,6 +612,9 @@ function pollCrawl() {
   adminFetch('/api/admin/crawl-status').then(function(r){ return r.json(); }).then(function(s){
     var el = document.getElementById('crawlStats');
     el.textContent = '抓取 ' + s.fetched + ' 页 · 发现 ' + s.discovered + ' 链接 · 失败 ' + s.failed + ' · robots跳过 ' + s.skipped_robots + (s.elapsed_secs > 0 ? ' · 耗时 ' + Math.round(s.elapsed_secs) + 's' : '');
+    // 爬取中加载动画
+    var sp = document.getElementById('crawlSpinner');
+    if (sp) sp.style.display = s.running ? 'inline-block' : 'none';
   }).catch(function(){});
 }
 

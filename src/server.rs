@@ -397,6 +397,11 @@ fn api_search(ctx: &ServerCtx, req: &Request) -> Response {
         let meta_page = meta_page.min(meta_pages.max(1));
         let meta_start = (meta_page - 1) * 10;
         meta_results = meta_results.into_iter().skip(meta_start).take(10).collect();
+        // 自动编入引擎:结果 URL 入待收录队列(后台线程抓取 → out/crawled → 重建索引后本地可搜)
+        let ingested = crate::metasearch::enqueue_ingest(&meta);
+        if ingested > 0 {
+            crate::logger::push(format!("[meta] 聚合结果 {} 条已入待收录队列(自动编入引擎)", ingested));
+        }
     }
     let meta_elapsed_ms = meta_ms;
 
@@ -1206,6 +1211,68 @@ fn admin_site_save(_ctx: &ServerCtx, req: &Request) -> Response {
         if cfg.gongan.is_empty() { "无" } else { &cfg.gongan }
     ));
     Response::json(200, r#"{"status":"ok"}"#)
+}
+
+/// 聚合结果自动收录线程:每 60s 读取待收录队列(data/meta_ingest.txt),
+/// 抓取页面(带 SEO 身份)存入 out/crawled/<domain>/meta_*.html,
+/// 下次索引重建自动收录(页面级收录)——"其它搜索引擎的结果自动编入引擎"
+pub fn spawn_meta_ingest(ctx: &ServerCtx) {
+    let out_dir = crawl_out_dir();
+    let _ = ctx;
+    std::thread::spawn(move || {
+        const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 PilseoSEO/1.0 (+https://github.com/yxpil/PILSEOCORE)";
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            let path = crate::config::index_dir().join("meta_ingest.txt");
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let urls: Vec<String> = text
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            if urls.is_empty() {
+                continue;
+            }
+            let mut done = 0usize;
+            let mut fail = 0usize;
+            for url in urls.iter().take(30) {
+                match crate::http::http_get(url, 8000, UA) {
+                    Ok((200, html)) => {
+                        if let Some(domain) = crate::crawler::domain_of(url) {
+                            let safe_domain: String = domain
+                                .chars()
+                                .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+                                .collect();
+                            let dir = out_dir.join(&safe_domain);
+                            let _ = std::fs::create_dir_all(&dir);
+                            let h = crate::blacklist::fnv1a64(url);
+                            let f = dir.join(format!("meta_{:016x}.html", h));
+                            if std::fs::write(&f, &html).is_ok() {
+                                done += 1;
+                            } else {
+                                fail += 1;
+                            }
+                        } else {
+                            fail += 1;
+                        }
+                    }
+                    _ => fail += 1,
+                }
+            }
+            // 已处理的出队(失败的不重试,下次聚合会重新入队;每轮最多 30 条防阻塞)
+            let remaining: Vec<String> = urls.iter().skip(30).cloned().collect();
+            let _ = std::fs::write(
+                &path,
+                if remaining.is_empty() { String::new() } else { remaining.join("\n") + "\n" },
+            );
+            if done > 0 || fail > 0 {
+                crate::logger::push(format!(
+                    "[ingest] 聚合结果收录: 成功 {} 条 / 失败 {} 条(已存入 crawled,重建索引后本地可搜)",
+                    done, fail
+                ));
+            }
+        }
+    });
 }
 
 /// favicon:现场获取——favicon.ico 优先,失败解析页面 <link rel="icon"> 抓真实路径,
