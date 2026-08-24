@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,8 +40,30 @@ pub fn http_get_full(url: &str, timeout_ms: u64, ua: &str) -> Result<(u16, Vec<(
     if host.is_empty() {
         return Err(format!("地址无效: {}", url));
     }
-    let addr = format!("{}:{}", host, port);
-    let mut stream = TcpStream::connect(&addr).map_err(|e| format!("连接 {} 失败: {}", addr, e))?;
+    // 解析全部地址,IPv4 优先逐个尝试(Windows getaddrinfo 常 IPv6 优先,
+    // 若 IPv6 不通且只试第一个地址,IPv4 可达也会失败)
+    let mut addrs: Vec<std::net::SocketAddr> = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("DNS 解析 {} 失败: {}", host, e))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(format!("DNS 解析 {} 无结果", host));
+    }
+    addrs.sort_by_key(|a| if a.is_ipv4() { 0 } else { 1 });
+    // 连接超时收紧(上限 3 秒):不可达站快速失败,不拖慢整批
+    let connect_timeout = Duration::from_millis(timeout_ms.min(3000));
+    let mut last_err = String::new();
+    let mut stream: Option<TcpStream> = None;
+    for a in &addrs {
+        match TcpStream::connect_timeout(a, connect_timeout) {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(e) => last_err = format!("{}: {}", a, e),
+        }
+    }
+    let mut stream = stream.ok_or_else(|| format!("连接 {}:{} 失败(全部地址不可达): {}", host, port, last_err))?;
     stream
         .set_read_timeout(Some(Duration::from_millis(timeout_ms)))
         .map_err(|e| format!("设置超时失败: {}", e))?;
@@ -160,7 +182,10 @@ fn curl_get_full(url: &str, timeout_ms: u64, ua: &str) -> Result<(u16, Vec<(Stri
     let _ = std::fs::remove_file(&hf);
     let _ = std::fs::remove_file(&bf);
     if code == 0 {
-        return Err(format!("curl 请求失败: {}", url));
+        // 带上 curl 的具体错误(拒绝/超时/DNS 等),便于诊断
+        let err_detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let detail = if err_detail.is_empty() { "未知错误".to_string() } else { err_detail };
+        return Err(format!("curl 请求失败 {}: {}", url, detail));
     }
     Ok((code, headers, body))
 }

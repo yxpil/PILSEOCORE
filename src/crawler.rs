@@ -50,6 +50,8 @@ pub struct Crawler {
     /// LRU 顺序(用于淘汰 favicon 缓存)
     pub favicon_order: Arc<Mutex<VecDeque<String>>>,
     pub stats: Arc<Mutex<CrawlStats>>,
+    /// 域名连接级失败缓存:domain -> 失败时间戳(短时间不再重试,避免反复等超时)
+    fail_cache: Arc<Mutex<HashMap<String, u64>>>,
     max_depth: usize,
     max_pages: usize,
     per_domain: usize,
@@ -87,6 +89,7 @@ impl Crawler {
             favicons,
             favicon_order,
             stats,
+            fail_cache: Arc::new(Mutex::new(HashMap::new())),
             max_depth: max_depth.max(1),
             max_pages: max_pages.max(1).min(200_000),
             per_domain: per_domain.max(1),
@@ -106,7 +109,7 @@ impl Crawler {
         self.workers.store(v, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// 重置状态(新一轮抓取)
+    /// 重置状态(新一轮抓取);失败域名缓存保留(跨轮次避免反复等超时)
     pub fn reset(&self) {
         self.visited.lock().unwrap().clear();
         self.robots.lock().unwrap().clear();
@@ -181,6 +184,7 @@ impl Crawler {
         let favicons = self.favicons.clone();
         let favicon_order = self.favicon_order.clone();
         let stats = self.stats.clone();
+        let fail_cache = self.fail_cache.clone();
         let workers_n = self.worker_count();
         let (max_depth, max_pages, per_domain, timeout_ms) = (self.max_depth, self.max_pages, self.per_domain, self.timeout_ms);
         let out_dir_owned = out_dir.to_path_buf();
@@ -194,10 +198,11 @@ impl Crawler {
             let favicons = favicons.clone();
             let favicon_order = favicon_order.clone();
             let stats = stats.clone();
+            let fail_cache = fail_cache.clone();
             let out = out_dir_owned.clone();
             handles.push(std::thread::spawn(move || {
                 worker_loop(
-                    q, pdc, visited, robots, favicons, favicon_order, stats,
+                    q, pdc, visited, robots, favicons, favicon_order, stats, fail_cache,
                     max_depth, max_pages, per_domain, timeout_ms, &out,
                 )
             }));
@@ -242,6 +247,7 @@ fn worker_loop(
     favicons: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     favicon_order: Arc<Mutex<VecDeque<String>>>,
     stats: Arc<Mutex<CrawlStats>>,
+    fail_cache: Arc<Mutex<HashMap<String, u64>>>,
     max_depth: usize,
     max_pages: usize,
     per_domain: usize,
@@ -326,6 +332,21 @@ fn worker_loop(
         }
         // 域名页数限制
         let domain = domain_of(&url).unwrap_or_default();
+        // 失败域名缓存:连接级失败(拒绝/DNS/超时)通常持续,短时间(300s)不再重试,
+        // 避免每个 URL 反复等超时拖慢整批
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let fc = fail_cache.lock().unwrap();
+            if let Some(&t) = fc.get(&domain) {
+                if now.saturating_sub(t) < 300 {
+                    crate::logger::push(format!("[crawler] 域名失败缓存跳过(300s): {}", url));
+                    continue;
+                }
+            }
+        }
         {
             let mut pdc = per_domain_count.lock().unwrap();
             let cnt = pdc.entry(domain.clone()).or_insert(0);
@@ -346,6 +367,7 @@ fn worker_loop(
         let mut all_html: Vec<String> = Vec::new();
         let mut redirect_info: Option<(u16, Vec<(String, String)>)> = None;
         let mut ua_results: Vec<String> = Vec::new(); // 每 UA 结果摘要(失败诊断)
+        let mut dns_failed = false; // DNS 解析失败:https 兜底必然也失败,跳过
         for ua in CRAWLER_UAS {
             let tag = &ua[..ua.len().min(18)];
             match http_get_full(&url, timeout_ms, ua) {
@@ -363,12 +385,32 @@ fn worker_loop(
                     }
                 }
                 Ok((status, _, _)) => ua_results.push(format!("{}:{}", tag, status)),
-                Err(_) => ua_results.push(format!("{}:ERR", tag)),
+                Err(e) => {
+                    // 错误分类:拒绝/超时/DNS/其他,便于诊断
+                    let el = e.to_lowercase();
+                    let kind = if el.contains("refused") {
+                        "REFUSED"
+                    } else if el.contains("timed out") || el.contains("timeout") {
+                        "TIMEOUT"
+                    } else if el.contains("dns") || el.contains("resolve") || el.contains("lookup") || el.contains("no result") {
+                        "DNS"
+                    } else {
+                        "ERR"
+                    };
+                    ua_results.push(format!("{}:{}", tag, kind));
+                    // 连接级失败与 UA 无关:其余 UA 必然同样失败,快速失败不再试
+                    // (https 兜底仍会尝试:80 关闭但 443 可能开放)
+                    if kind == "DNS" {
+                        dns_failed = true;
+                    }
+                    break;
+                }
             }
         }
-        // http 全部 UA 失败(连接失败/超时)→ 站点可能只支持 https:单 UA 试一次 https
+        // http 全部 UA 失败(连接失败/超时)→ 站点可能只支持 https:单 UA 试一次 https;
+        // DNS 解析失败则跳过(https 域名必然也解析失败)
         let mut effective_url = url.clone();
-        if best_html.is_none() && redirect_info.is_none() && url.starts_with("http://") {
+        if best_html.is_none() && redirect_info.is_none() && !dns_failed && url.starts_with("http://") {
             let https_url = format!("https://{}", &url["http://".len()..]);
             match http_get_full(&https_url, timeout_ms, CRAWLER_UAS[0]) {
                 Ok((status, _, html)) if status == 200 => {
@@ -453,6 +495,14 @@ fn worker_loop(
         } else {
             crate::logger::push(format!("[crawler] 抓取失败 {} | UA结果: {}", url, ua_results.join(" ")));
             stats.lock().unwrap().failed += 1;
+            // 域名失败缓存:连接级失败通常持续,300s 内该域名不再重试
+            if !domain.is_empty() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                fail_cache.lock().unwrap().insert(domain.clone(), now);
+            }
         }
     }
 }
