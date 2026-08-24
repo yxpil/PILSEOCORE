@@ -202,6 +202,9 @@ pub fn handle(ctx: &ServerCtx, req: &Request) -> Response {
         ("POST", "/api/admin/cleanup") => admin_guard(ctx, req, |ctx| admin_cleanup(ctx, req)),
         // ---- 统计 ----
         ("GET", "/api/admin/stats") => admin_guard(ctx, req, |ctx| admin_stats(ctx)),
+        // ---- 聚合搜索(其它搜索引擎)配置 ----
+        ("GET", "/api/admin/metasearch") => admin_guard(ctx, req, |ctx| admin_metasearch_get(ctx)),
+        ("POST", "/api/admin/metasearch") => admin_guard(ctx, req, |ctx| admin_metasearch_save(ctx, req)),
         // ---- favicon(内存缓存,公开可访问) ----
         ("GET", "/api/favicon/") => Response::json(404, r#"{"error":"缺少域名"}"#),
         ("GET", p) if p.starts_with("/api/favicon/") => {
@@ -323,8 +326,6 @@ fn api_stats(ctx: &ServerCtx) -> Response {
 
 fn api_search(ctx: &ServerCtx, req: &Request) -> Response {
     let q = req.param("q").unwrap_or("").trim().to_string();
-    // 搜索统计(内存聚合)
-    ctx.stats.record(&q);
     let page = req.param("page").and_then(|s| s.parse::<usize>().ok()).unwrap_or(1).max(1);
     let limit = req.param("limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(10).min(100).max(1);
     let want_ai = req.param("ai").map(|v| v == "1" || v == "true").unwrap_or(false);
@@ -335,6 +336,8 @@ fn api_search(ctx: &ServerCtx, req: &Request) -> Response {
     let (total, hits) = ctx.engine.search(&q, page, limit);
     let elapsed_ms = start.elapsed().as_millis();
     let pages = (total + limit - 1) / limit;
+    // 搜索统计(内存聚合,含响应耗时)
+    ctx.stats.record(&q, elapsed_ms as u64);
 
     // 本地索引搜不到 → 聚合搜索(必应/百度/360/搜狗/谷歌/中国搜索),
     // 结果缓存到本地引擎(下次同词直接命中,不再联网)
@@ -346,6 +349,9 @@ fn api_search(ctx: &ServerCtx, req: &Request) -> Response {
         let (meta, from_cache) = crate::metasearch::search_cached(&q);
         meta_from_cache = from_cache;
         meta_ms = meta_start.elapsed().as_millis();
+        // 聚合搜索统计(引擎来源 + 缓存命中)
+        let engines: Vec<String> = meta.iter().map(|m| m.engine.clone()).collect();
+        ctx.stats.record_meta(&engines, from_cache);
         meta_results = meta
             .iter()
             .map(|m| {
@@ -929,6 +935,12 @@ fn admin_stats(ctx: &ServerCtx) -> Response {
         .iter()
         .map(|(d, n)| Json::build(vec![("date", Json::str(d)), ("count", Json::num(*n as f64))]))
         .collect();
+    // 性能与聚合搜索统计
+    let (avg_ms, meta_searches, meta_hits, meta_misses, latency_samples, meta_engines) = ctx.stats.perf_snapshot();
+    let engines: Vec<Json> = meta_engines
+        .iter()
+        .map(|(e, n)| Json::build(vec![("engine", Json::str(e)), ("count", Json::num(*n as f64))]))
+        .collect();
     Response::json(
         200,
         &Json::build(vec![
@@ -939,10 +951,78 @@ fn admin_stats(ctx: &ServerCtx) -> Response {
             ("index_terms", Json::num(terms as f64)),
             ("index_blocks", Json::num(blocks as f64)),
             ("cache_hit_rate", Json::num(if hits + misses > 0 { hits as f64 / (hits + misses) as f64 } else { 0.0 })),
+            ("avg_ms", Json::num(avg_ms)),
+            ("latency_samples", Json::num(latency_samples as f64)),
+            ("meta_searches", Json::num(meta_searches as f64)),
+            ("meta_cache_hits", Json::num(meta_hits as f64)),
+            ("meta_cache_misses", Json::num(meta_misses as f64)),
+            ("meta_cache_rate", Json::num(if meta_hits + meta_misses > 0 { meta_hits as f64 / (meta_hits + meta_misses) as f64 } else { 0.0 })),
+            ("meta_engines", Json::arr(engines)),
             ("crawler_workers", Json::num(ctx.crawler.worker_count() as f64)),
         ])
         .to_string(),
     )
+}
+
+/// 聚合搜索配置:引擎列表(内置 + 自定义)+ 启停状态
+fn admin_metasearch_get(ctx: &ServerCtx) -> Response {
+    let _ = ctx;
+    let builtin: Vec<Json> = crate::metasearch::PROVIDERS
+        .iter()
+        .map(|p| {
+            Json::build(vec![
+                ("id", Json::str(p.id)),
+                ("name", Json::str(p.name)),
+                ("url", Json::str(p.url)),
+                ("enabled", if crate::metasearch::provider_enabled(p.id) { Json::num(1.0) } else { Json::num(0.0) }),
+                ("builtin", Json::num(1.0)),
+            ])
+        })
+        .collect();
+    let custom: Vec<Json> = crate::metasearch::custom_providers()
+        .iter()
+        .map(|(n, u)| Json::build(vec![("name", Json::str(n)), ("url", Json::str(u)), ("builtin", Json::num(0.0))]))
+        .collect();
+    Response::json(
+        200,
+        &Json::build(vec![("engines", Json::arr(builtin)), ("custom", Json::arr(custom))]).to_string(),
+    )
+}
+
+/// 聚合搜索配置保存:{"enabled":["bing","baidu",...], "custom":[{"name":"..","url":".."}]}
+fn admin_metasearch_save(ctx: &ServerCtx, req: &Request) -> Response {
+    let _ = ctx;
+    let body = String::from_utf8_lossy(&req.body).to_string();
+    let Ok(j) = crate::json::parse(&body) else {
+        return Response::json(400, r#"{"error":"JSON 解析失败"}"#);
+    };
+    let enabled: Vec<String> = j
+        .get("enabled")
+        .and_then(|v| v.as_arr())
+        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    if let Err(e) = crate::metasearch::save_config(&enabled) {
+        return Response::json(500, &Json::build(vec![("error", Json::str(&e))]).to_string());
+    }
+    // 自定义引擎(整体覆盖保存)
+    let custom: Vec<(String, String)> = j
+        .get("custom")
+        .and_then(|v| v.as_arr())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| {
+                    let n = x.get("name").and_then(|v| v.as_str())?.to_string();
+                    let u = x.get("url").and_then(|v| v.as_str())?.to_string();
+                    Some((n, u))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Err(e) = crate::metasearch::save_custom(&custom) {
+        return Response::json(500, &Json::build(vec![("error", Json::str(&e))]).to_string());
+    }
+    crate::logger::push(format!("[admin] 聚合引擎配置已保存: 启用 {} 个, 自定义 {} 个", enabled.len(), custom.len()));
+    Response::json(200, r#"{"status":"ok"}"#)
 }
 
 /// favicon:现场获取——favicon.ico 优先,失败解析页面 <link rel="icon"> 抓真实路径,

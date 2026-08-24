@@ -57,6 +57,15 @@
 
   .msg { font-size:13px; margin-top:10px; min-height:18px; }
   .msg.ok { color:var(--green); } .msg.err { color:var(--red); } .msg.warn { color:#b06000; }
+  .charts { display:flex; gap:18px; flex-wrap:wrap; align-items:flex-start; }
+  .chart-box { display:flex; gap:14px; align-items:center; flex:1; min-width:300px; }
+  .chart-box canvas { width:200px; height:200px; flex-shrink:0; }
+  .legend { flex:1; font-size:13px; color:var(--gray); line-height:2; }
+  .legend b { color:var(--text); font-weight:600; }
+  .perf-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:10px; }
+  .perf-item { background:#f8f9fa; border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .perf-item .k { font-size:12px; color:var(--gray); }
+  .perf-item .v { font-size:20px; font-weight:700; margin-top:4px; }
 
   .bar-wrap { background:#f1f3f4; border-radius:8px; height:8px; overflow:hidden; margin:10px 0 6px; }
   .bar { background:var(--blue); height:100%; width:0; transition:width .3s; border-radius:8px; }
@@ -104,6 +113,7 @@
       <div class="nav-item" data-view="scan" onclick="switchView('scan')">穷举控制</div>
       <div class="nav-item" data-view="config" onclick="switchView('config')">后缀与 DNS</div>
       <div class="nav-item" data-view="crawl" onclick="switchView('crawl')">爬虫</div>
+      <div class="nav-item" data-view="metasearch" onclick="switchView('metasearch')">聚合搜索</div>
       <div class="nav-item" data-view="tasks" onclick="switchView('tasks')">定时任务</div>
       <div class="nav-item" data-view="duplicates" onclick="switchView('duplicates')">重复清理</div>
       <div class="nav-item" data-view="stats" onclick="switchView('stats')">统计</div>
@@ -226,18 +236,53 @@
     <!-- 统计 -->
     <section id="view-stats" class="view">
       <h2>统计</h2>
-      <div class="sub">搜索热词、每日搜索量、索引规模、缓存命中率(内存聚合,周期落盘)</div>
+      <div class="sub">搜索热词、聚合来源、性能分析(内存聚合,周期落盘)</div>
       <div class="card">
-        <h3>搜索热词 TOP 30</h3>
-        <div id="hotQueries" class="kw-list"></div>
+        <h3>搜索热词 TOP 30(饼图)</h3>
+        <div class="charts">
+          <div class="chart-box">
+            <canvas id="pieQueries" width="200" height="200"></canvas>
+            <div id="hotQueries" class="legend"></div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>聚合搜索来源占比(饼图)</h3>
+        <div class="charts">
+          <div class="chart-box">
+            <canvas id="pieEngines" width="200" height="200"></canvas>
+            <div id="engineStats" class="legend"></div>
+          </div>
+        </div>
       </div>
       <div class="card">
         <h3>每日搜索量</h3>
         <div id="dailyStats" class="kw-list"></div>
       </div>
       <div class="card">
-        <h3>索引与性能</h3>
-        <div id="perfStats" class="state-line" style="margin:0"></div>
+        <h3>性能分析</h3>
+        <div id="perfStats" class="perf-grid"></div>
+      </div>
+    </section>
+
+    <!-- 聚合搜索配置 -->
+    <section id="view-metasearch" class="view">
+      <h2>聚合搜索(其它搜索引擎)</h2>
+      <div class="sub">本地索引搜不到时,借用必应/百度/360/搜狗/谷歌/中国搜索等外部引擎,结果缓存到本地(下次同词直接命中)。可启停内置引擎、添加自定义引擎(URL 模板用 {q} 占位查询词)</div>
+      <div class="card">
+        <h3>内置引擎启停</h3>
+        <div id="metaBuiltin"></div>
+        <button class="btn sm" style="margin-top:12px" onclick="saveMetasearch()">保存引擎配置</button>
+        <div class="msg" id="metaMsg"></div>
+      </div>
+      <div class="card">
+        <h3>自定义引擎</h3>
+        <div id="metaCustomList"></div>
+        <div class="row" style="margin-top:12px">
+          <input type="text" id="customName" placeholder="引擎名称,如 神马搜索">
+          <input type="text" id="customUrl" placeholder="URL 模板,如 https://www.sm.cn/s?q={q}">
+          <button class="btn sm" style="flex-shrink:0" onclick="addCustomEngine()">添加自定义引擎</button>
+        </div>
       </div>
     </section>
 
@@ -353,6 +398,7 @@ function switchView(v) {
   if (v === 'tasks') { loadTasks(); ensureTimer('tasks', loadTasks, 10000); }
   if (v === 'duplicates') { loadDuplicates(dupPage); ensureTimer('dup', function(){ loadDuplicates(dupPage); }, 30000); }
   if (v === 'stats') { loadStats(); ensureTimer('stats', loadStats, 10000); }
+  if (v === 'metasearch') { loadMetasearch(); }
   if (v === 'overview') { loadOverview(); pollScan(); pollIndexStatus(); ensureTimer('idx', pollIndexStatus, 2000); if (!logTimer) { logTimer = setInterval(pollLogs, 1500); pollLogs(); } }
   if (v === 'scan') { pollScan(); ensureTimer('scan', pollScan, 3000); }
 }
@@ -615,19 +661,114 @@ function cleanupSelected() {
   }).catch(function(e){ setMsg('msg', '请求失败: ' + e, 'err'); });
 }
 
-/* ============ 统计 ============ */
+/* ============ 统计(饼图 + 性能分析) ============ */
+var PIE_COLORS = ['#4285f4','#ea4335','#fbbc04','#34a853','#ff6d01','#46bdc6','#ac4bff','#4ade80','#ff8bcb','#5f6368'];
+function drawPie(canvasId, items, total) {
+  var c = document.getElementById(canvasId);
+  if (!c || !c.getContext) return;
+  var ctx = c.getContext('2d');
+  var w = c.width, h = c.height, cx = w / 2, cy = h / 2, r = Math.min(w, h) / 2 - 4;
+  ctx.clearRect(0, 0, w, h);
+  if (!items.length || !total) {
+    ctx.fillStyle = '#e8eaed'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    return;
+  }
+  var start = -Math.PI / 2;
+  items.forEach(function(it, i) {
+    var ang = it.v / total * Math.PI * 2;
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, r, start, start + ang); ctx.closePath();
+    ctx.fillStyle = PIE_COLORS[i % PIE_COLORS.length]; ctx.fill();
+    if (ang > Math.PI * 0.14) {
+      var mid = start + ang / 2;
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 12px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(Math.round(it.v / total * 100) + '%', cx + Math.cos(mid) * r * 0.62, cy + Math.sin(mid) * r * 0.62);
+    }
+    start += ang;
+  });
+}
 function loadStats() {
   adminFetch('/api/admin/stats').then(function(r){ return r.json(); }).then(function(s){
+    // 热词:饼图(TOP 8)+ 列表
+    var top8 = (s.top_queries || []).slice(0, 8).map(function(t){ return { k: t.query, v: t.count }; });
+    var sum = top8.reduce(function(a, b){ return a + b.v; }, 0) || 1;
+    drawPie('pieQueries', top8, sum);
     var q = document.getElementById('hotQueries');
     if (!s.top_queries.length) q.innerHTML = '<div class="sub" style="margin:0">暂无搜索记录</div>';
-    else q.innerHTML = s.top_queries.map(function(t, i){ return '<div class="kw-item"><span class="rank">' + (i+1) + '</span>' + esc(t.query) + ' <span class="tag">' + t.count + ' 次</span></div>'; }).join('');
+    else q.innerHTML = s.top_queries.slice(0, 8).map(function(t, i){
+      return '<div><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:' + PIE_COLORS[i % PIE_COLORS.length] + ';margin-right:6px"></span><b>' + esc(t.query) + '</b> <span class="tag">' + t.count + ' 次</span></div>';
+    }).join('');
+    // 聚合来源饼图
+    var engs = (s.meta_engines || []).map(function(e){ return { k: e.engine, v: e.count }; });
+    var esum = engs.reduce(function(a, b){ return a + b.v; }, 0) || 1;
+    drawPie('pieEngines', engs, esum);
+    var es = document.getElementById('engineStats');
+    if (!engs.length) es.innerHTML = '<div class="sub" style="margin:0">暂无聚合搜索记录(本地搜不到时自动触发)</div>';
+    else es.innerHTML = engs.map(function(e, i){
+      return '<div><span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:' + PIE_COLORS[i % PIE_COLORS.length] + ';margin-right:6px"></span><b>' + esc(e.k) + '</b> <span class="tag">' + e.v + ' 条结果</span></div>';
+    }).join('');
+    // 每日
     var d = document.getElementById('dailyStats');
     if (!s.daily.length) d.innerHTML = '<div class="sub" style="margin:0">暂无数据</div>';
     else d.innerHTML = s.daily.map(function(t){ return '<div class="kw-item"><span class="tag">' + esc(t.date) + '</span> ' + t.count + ' 次搜索</div>'; }).join('');
-    document.getElementById('perfStats').innerHTML =
-      '总搜索 ' + s.total_searches + ' 次 · 索引 ' + s.index_sites + ' 站 / ' + s.index_terms + ' 词 / ' + s.index_blocks + ' 分块 · ' +
-      '缓存命中率 ' + Math.round(s.cache_hit_rate * 100) + '% · 爬虫并发 ' + s.crawler_workers;
+    // 性能分析卡片
+    var p = document.getElementById('perfStats');
+    var items = [
+      { k: '总搜索次数', v: s.total_searches + ' 次' },
+      { k: '平均响应', v: (s.avg_ms || 0).toFixed(1) + ' ms' },
+      { k: '本地缓存命中率', v: Math.round((s.cache_hit_rate || 0) * 100) + '%' },
+      { k: '聚合搜索次数', v: s.meta_searches + ' 次' },
+      { k: '聚合缓存命中率', v: Math.round((s.meta_cache_rate || 0) * 100) + '%' },
+      { k: '索引规模', v: s.index_sites + ' 站 / ' + s.index_terms + ' 词' },
+      { k: '索引分块', v: s.index_blocks + ' 块' },
+      { k: '爬虫并发', v: s.crawler_workers + ' workers' },
+    ];
+    p.innerHTML = items.map(function(it){ return '<div class="perf-item"><div class="k">' + it.k + '</div><div class="v">' + it.v + '</div></div>'; }).join('');
   }).catch(function(){});
+}
+
+/* ============ 聚合搜索(其它搜索引擎)配置 ============ */
+var customEngines = [];
+function loadMetasearch() {
+  adminFetch('/api/admin/metasearch').then(function(r){ return r.json(); }).then(function(d){
+    var h = '';
+    (d.engines || []).forEach(function(e){
+      h += '<div class="row" style="margin-bottom:10px">' +
+        '<input type="checkbox" id="me_' + e.id + '" ' + (e.enabled ? 'checked' : '') + ' style="width:auto;flex-shrink:0">' +
+        '<label style="margin:0;flex:1"><b>' + esc(e.name) + '</b> <span style="color:var(--gray);font-size:12px">' + esc(e.url) + '</span></label></div>';
+    });
+    document.getElementById('metaBuiltin').innerHTML = h;
+    customEngines = (d.custom || []).map(function(c){ return { name: c.name, url: c.url }; });
+    renderCustomEngines();
+    document.getElementById('metaMsg').textContent = '';
+  }).catch(function(e){ document.getElementById('metaBuiltin').innerHTML = '<div class="msg err">加载失败: ' + e + '</div>'; });
+}
+function renderCustomEngines() {
+  var box = document.getElementById('metaCustomList');
+  if (!customEngines.length) { box.innerHTML = '<div class="sub" style="margin:0">暂无自定义引擎(添加后保存生效)</div>'; return; }
+  box.innerHTML = customEngines.map(function(c, i){
+    return '<div class="row" style="margin-bottom:8px"><span style="flex:1"><b>' + esc(c.name) + '</b> <span style="color:var(--gray);font-size:12px">' + esc(c.url) + '</span></span>' +
+      '<button class="btn danger sm" onclick="customEngines.splice(' + i + ',1);renderCustomEngines()">删除</button></div>';
+  }).join('');
+}
+function addCustomEngine() {
+  var n = document.getElementById('customName').value.trim();
+  var u = document.getElementById('customUrl').value.trim();
+  if (!n || !u) { setMsg('metaMsg', '名称与 URL 模板不能为空', 'err'); return; }
+  if (u.indexOf('{q}') === -1) { setMsg('metaMsg', 'URL 模板需包含 {q} 占位查询词', 'warn'); }
+  customEngines.push({ name: n, url: u });
+  document.getElementById('customName').value = '';
+  document.getElementById('customUrl').value = '';
+  renderCustomEngines();
+  setMsg('metaMsg', '已添加(点击"保存引擎配置"生效)', 'ok');
+}
+function saveMetasearch() {
+  var enabled = [];
+  document.querySelectorAll('#metaBuiltin input[type=checkbox]').forEach(function(cb){ if (cb.checked) enabled.push(cb.id.replace('me_', '')); });
+  adminFetch('/api/admin/metasearch', { method: 'POST', body: JSON.stringify({ enabled: enabled, custom: customEngines }) })
+    .then(function(r){ return r.json(); }).then(function(d){
+      setMsg('metaMsg', '已保存: 启用 ' + enabled.length + ' 个内置引擎 + ' + customEngines.length + ' 个自定义引擎,下次聚合搜索生效', 'ok');
+    }).catch(function(e){ setMsg('metaMsg', '保存失败: ' + e, 'err'); });
 }
 
 /* ============ 索引构建进度 + 实时日志 ============ */

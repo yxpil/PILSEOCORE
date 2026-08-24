@@ -16,6 +16,7 @@ pub struct MetaResult {
 
 /// 引擎配置:url 模板用 {q} 占位查询词
 pub struct MetaProvider {
+    pub id: &'static str,
     pub name: &'static str,
     pub url: &'static str,
     /// 引擎自身功能页特征(排除搜索页/登录/帮助等噪声链接)
@@ -25,36 +26,110 @@ pub struct MetaProvider {
 /// 内置聚合引擎(顺序即优先级):必应 / 百度 / 360搜索 / 搜狗 / 谷歌 / 中国搜索
 pub const PROVIDERS: &[MetaProvider] = &[
     MetaProvider {
+        id: "bing",
         name: "必应",
         url: "https://www.bing.com/search?q={q}&mkt=zh-CN&count=10",
         noise: &["bing.com/search", "bing.com/images", "bing.com/videos", "go.microsoft.com"],
     },
     MetaProvider {
+        id: "baidu",
         name: "百度",
         url: "https://www.baidu.com/s?wd={q}&rn=10",
         noise: &["baidu.com/s?", "baidu.com/sug", "baidu.com/cse", "top.baidu.com"],
     },
     MetaProvider {
+        id: "so360",
         name: "360搜索",
         url: "https://www.so.com/s?q={q}",
         noise: &["so.com/s?", "so.com/so", "360.cn", "zhushou.360.cn"],
     },
     MetaProvider {
+        id: "sogou",
         name: "搜狗",
         url: "https://www.sogou.com/web?query={q}",
         noise: &["sogou.com/web?", "sogou.com/sogou", "sogou.com/s?query"],
     },
     MetaProvider {
+        id: "google",
         name: "谷歌",
         url: "https://www.google.com/search?q={q}&hl=zh-CN&num=10",
         noise: &["google.com/search", "google.com/maps", "google.com/images", "support.google.com"],
     },
     MetaProvider {
+        id: "chinaso",
         name: "中国搜索",
         url: "https://www.chinaso.com/newssearch/all?q={q}",
         noise: &["chinaso.com/newssearch", "chinaso.com/so", "chinaso.com/search"],
     },
 ];
+
+/// 启停配置文件:data/metasearch.conf(每行 id=1/0;缺省=启用)
+pub fn config_path() -> std::path::PathBuf {
+    crate::config::index_dir().join("metasearch.conf")
+}
+
+/// 引擎是否启用(读 data/metasearch.conf;id 未配置默认启用)
+pub fn provider_enabled(id: &str) -> bool {
+    if let Ok(text) = std::fs::read_to_string(config_path()) {
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut it = line.split('=');
+            if let (Some(k), Some(v)) = (it.next(), it.next()) {
+                if k.trim() == id {
+                    return v.trim() == "1" || v.trim().eq_ignore_ascii_case("true");
+                }
+            }
+        }
+    }
+    true // 默认启用
+}
+
+/// 保存启停配置(管理面板)
+pub fn save_config(enabled_ids: &[String]) -> Result<(), String> {
+    let _ = std::fs::create_dir_all(crate::config::index_dir());
+    let mut text = String::from("# PILSEOCORE 聚合搜索引擎启停配置\n# 每行 引擎id=1/0(1 启用,0 禁用)\n");
+    for p in PROVIDERS {
+        let on = enabled_ids.iter().any(|i| i == p.id);
+        text.push_str(&format!("{}= {}\n", p.id, if on { 1 } else { 0 }));
+    }
+    std::fs::write(config_path(), text).map_err(|e| format!("保存聚合引擎配置失败: {}", e))
+}
+
+/// 自定义引擎配置(管理面板添加):data/metasearch_custom.conf
+/// 每行:名称\tURL模板({q} 占位)
+pub fn custom_providers() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let path = crate::config::index_dir().join("metasearch_custom.conf");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut it = line.split('\t');
+            if let (Some(name), Some(url)) = (it.next(), it.next()) {
+                if !name.is_empty() && !url.is_empty() {
+                    out.push((name.to_string(), url.to_string()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 保存自定义引擎配置
+pub fn save_custom(list: &[(String, String)]) -> Result<(), String> {
+    let _ = std::fs::create_dir_all(crate::config::index_dir());
+    let mut text = String::from("# PILSEOCORE 自定义聚合搜索引擎\n# 每行:名称\tURL模板({q} 占位查询词)\n");
+    for (n, u) in list {
+        text.push_str(&format!("{}\t{}\n", n.replace('\t', " "), u));
+    }
+    std::fs::write(crate::config::index_dir().join("metasearch_custom.conf"), text)
+        .map_err(|e| format!("保存自定义引擎失败: {}", e))
+}
 
 /// URL 编码(查询词):保留字母数字,其余 percent 编码(UTF-8 字节)
 fn urlencode(s: &str) -> String {
@@ -254,18 +329,35 @@ pub fn search_cached(q: &str) -> (Vec<MetaResult>, bool) {
     (results, false)
 }
 
-/// 并发抓取全部引擎(每引擎独立线程,互不影响;整体耗时 ≈ 最慢引擎的超时)
-/// 用浏览器 UA(聚合搜索 = 代替用户搜索,非爬站点;带爬虫后缀会被引擎拦截)
+/// 并发抓取全部启用的引擎 + 自定义引擎(每引擎独立线程,互不影响;
+/// 整体耗时 ≈ 最慢引擎的超时)。用浏览器 UA(聚合搜索 = 代替用户搜索,
+/// 非爬站点;带爬虫后缀会被引擎拦截)
 pub fn search_live(q: &str) -> Vec<MetaResult> {
     const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
     let q_owned = q.to_string();
     let mut handles = Vec::new();
+    // 内置引擎(按启停配置过滤)
     for p in PROVIDERS {
+        if !provider_enabled(p.id) {
+            continue;
+        }
         let qq = q_owned.clone();
         let url = p.url.replace("{q}", &urlencode(&qq));
         handles.push(std::thread::spawn(move || {
             match crate::http::http_get(&url, 6000, BROWSER_UA) {
-                Ok((200, html)) => parse(&html, &p),
+                Ok((200, html)) => parse(&html, p),
+                _ => Vec::new(),
+            }
+        }));
+    }
+    // 自定义引擎(名称 + URL 模板,通用解析;URL 模板 {q} 占位)
+    for (name, tmpl) in custom_providers() {
+        let qq = q_owned.clone();
+        let url = tmpl.replace("{q}", &urlencode(&qq));
+        let provider = MetaProvider { id: "custom", name: Box::leak(name.into_boxed_str()), url: Box::leak(tmpl.into_boxed_str()), noise: &[] };
+        handles.push(std::thread::spawn(move || {
+            match crate::http::http_get(&url, 6000, BROWSER_UA) {
+                Ok((200, html)) => parse(&html, &provider),
                 _ => Vec::new(),
             }
         }));
@@ -309,7 +401,7 @@ mod tests {
         let html = r#"<ol><li class="b_algo"><h2><a href="https://example.com/a" h="ID=SERP,1">量子纠缠 百科</a></h2><p>描述文本</p></li>
         <li><h3><a href="javascript:void(0)" class="btn">刷新</a></h3></li>
         <li><h3><a href="https://bad.com" class="x">ss="残留"垃圾标题</a></h3></li></ol>"#;
-        let p = MetaProvider { name: "测试", url: "", noise: &["bing.com/search"] };
+        let p = MetaProvider { id: "test", name: "测试", url: "", noise: &["bing.com/search"] };
         let res = parse(html, &p);
         assert!(res.iter().any(|r| r.title == "量子纠缠 百科" && r.url == "https://example.com/a"), "got: {:?}", res.iter().map(|r| (&r.title, &r.url)).collect::<Vec<_>>());
         assert!(!res.iter().any(|r| r.title.contains("刷新") || r.title.contains("垃圾")), "got: {:?}", res.iter().map(|r| &r.title).collect::<Vec<_>>());
@@ -319,7 +411,7 @@ mod tests {
     fn parse_no_panic_unicode() {
         // 变长 Unicode(İ)与中文混排:切片安全,不 panic
         let html = "<h2><a href=\"https://x.com/1\">İSTANBUL 中文标题</a></h2><h3><a href=\"https://y.com/2\">第二个</a></h3>";
-        let p = MetaProvider { name: "测试", url: "", noise: &[] };
+        let p = MetaProvider { id: "test", name: "测试", url: "", noise: &[] };
         let res = parse(html, &p);
         assert!(res.len() >= 1);
     }

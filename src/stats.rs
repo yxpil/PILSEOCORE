@@ -1,4 +1,4 @@
-//! 搜索统计:查询热词、搜索总量、时段统计(内存聚合,周期落盘)
+﻿//! 搜索统计:查询热词、搜索总量、时段统计(内存聚合,周期落盘)
 //!
 //! - 查询词 -> 次数(内存 HashMap,高频查询即"热词")
 //! - 每日搜索量(简单按日期计数)
@@ -19,6 +19,16 @@ pub struct SearchStats {
     pub daily: HashMap<String, u64>,
     pub total: u64,
     pub started_at: u64,
+    /// 聚合搜索(借外部引擎)次数
+    pub meta_searches: u64,
+    /// 聚合缓存命中/未命中
+    pub meta_cache_hits: u64,
+    pub meta_cache_misses: u64,
+    /// 各引擎返回结果数(来源占比)
+    pub meta_engines: HashMap<String, u64>,
+    /// 性能:本地搜索响应时间累计(毫秒)与样本数
+    pub latency_sum_ms: u64,
+    pub latency_samples: u64,
 }
 
 pub struct StatsCollector {
@@ -62,8 +72,8 @@ impl StatsCollector {
         }
     }
 
-    /// 记录一次搜索
-    pub fn record(&self, query: &str) {
+    /// 记录一次搜索(含响应耗时)
+    pub fn record(&self, query: &str, latency_ms: u64) {
         let q = query.trim().to_lowercase();
         if q.is_empty() {
             return;
@@ -74,6 +84,8 @@ impl StatsCollector {
             *s.queries.entry(q.clone()).or_insert(0) += 1;
             *s.daily.entry(today).or_insert(0) += 1;
             s.total += 1;
+            s.latency_sum_ms += latency_ms;
+            s.latency_samples += 1;
         }
         // 周期落盘(每 60 秒)
         let mut dirty = self.dirty_since.lock().unwrap();
@@ -81,6 +93,40 @@ impl StatsCollector {
             self.save();
             *dirty = std::time::Instant::now();
         }
+    }
+
+    /// 记录一次聚合搜索(引擎来源统计 + 缓存命中/未命中)
+    pub fn record_meta(&self, engines: &[String], from_cache: bool) {
+        let mut s = self.stats.lock().unwrap();
+        s.meta_searches += 1;
+        if from_cache {
+            s.meta_cache_hits += 1;
+        } else {
+            s.meta_cache_misses += 1;
+        }
+        for e in engines {
+            *s.meta_engines.entry(e.clone()).or_insert(0) += 1;
+        }
+    }
+
+    /// 性能与聚合统计快照(供管理面板)
+    pub fn perf_snapshot(&self) -> (f64, u64, u64, u64, u64, Vec<(String, u64)>) {
+        let s = self.stats.lock().unwrap();
+        let avg_ms = if s.latency_samples > 0 {
+            s.latency_sum_ms as f64 / s.latency_samples as f64
+        } else {
+            0.0
+        };
+        let mut engines: Vec<(String, u64)> = s.meta_engines.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        engines.sort_by(|a, b| b.1.cmp(&a.1));
+        (
+            avg_ms,
+            s.meta_searches,
+            s.meta_cache_hits,
+            s.meta_cache_misses,
+            s.latency_samples,
+            engines,
+        )
     }
 
     /// 热门查询词 top N
@@ -166,9 +212,9 @@ mod tests {
     fn stats_record_and_top() {
         let dir = std::env::temp_dir().join(format!("pilseo_stats_test_{}", now_secs()));
         let sc = StatsCollector::new(&dir);
-        sc.record("智能家居");
-        sc.record("智能家居");
-        sc.record("人工智能");
+        sc.record("智能家居", 3);
+        sc.record("智能家居", 3);
+        sc.record("人工智能", 5);
         assert_eq!(sc.total(), 3);
         let top = sc.top_queries(5);
         assert_eq!(top[0].0, "智能家居");
