@@ -211,4 +211,16 @@ mod tests {
         assert!(!bl.is_blocked("a.com"));
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn fnv_is_deterministic() {
+        assert_eq!(fnv1a64("hello"), fnv1a64("hello"));
+        assert_ne!(fnv1a64("hello"), fnv1a64("world"));
+    }
+
+    #[test]
+    fn simhash_empty_and_self_distance() {
+        assert_eq!(simhash(""), 0, "empty text has zero fingerprint");
+        assert_eq!(hamming(simhash("same text"), simhash("same text")), 0, "identical text has distance 0");
+    }
 }

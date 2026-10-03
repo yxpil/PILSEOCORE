@@ -212,4 +212,28 @@ mod tests {
         assert!(!store.verify(&t));
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn sessions_ttl_expire_and_reject_forged() {
+        // Long TTL: a fresh session verifies, a forged/unknown token never does.
+        let s = Sessions::new(3600);
+        let tok = s.create();
+        assert!(s.verify(&tok), "fresh session must verify");
+        assert!(!s.verify("forged-or-guessed-token"), "unknown token must be rejected");
+        assert!(!s.verify(""), "empty token must be rejected");
+
+        // Zero TTL: the session is already expired the moment it is created.
+        let s2 = Sessions::new(0);
+        let t2 = s2.create();
+        assert!(!s2.verify(&t2), "expired (ttl=0) session must not verify");
+    }
+
+    #[test]
+    fn token_names_are_trimmed_and_defaulted() {
+        let dir = std::env::temp_dir().join(format!("pilseo_auth_name_{}", now_secs()));
+        let store = TokenStore::load(&dir);
+        let _ = store.create("   ");
+        assert_eq!(store.list()[0].name, "api", "blank name defaults to 'api'");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

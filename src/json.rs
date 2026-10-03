@@ -383,4 +383,58 @@ mod tests {
         let j = parse(r#"{"k":"中\u6587"}"#).unwrap();
         assert_eq!(j.get("k").unwrap().as_str(), Some("中文"));
     }
+
+    // ── injection / malformed-input hardening ──
+
+    #[test]
+    fn rejects_malformed_inputs() {
+        // The parser must return Err (never panic) on hostile / broken payloads.
+        for bad in [
+            "",
+            "   ",
+            "{",
+            "}",
+            "[",
+            "[1,2",
+            r#"{"a":}"#,
+            r#"{"a" 1}"#,        // missing colon
+            r#"{"a":"str" "#,    // missing comma/comma-brace
+            "\"unclosed",
+            r#"{"a":"tab	in key"}"#,
+            r#"{"a":"bad\q escape"}"#,
+            "null null",          // trailing garbage
+            "123 456",
+            r#"{"a":"\u12"}"#,    // short \u escape
+        ] {
+            assert!(parse(bad).is_err(), "must reject malformed JSON: {:?}", bad);
+        }
+    }
+
+    #[test]
+    fn escapes_xss_payload_when_serializing() {
+        // A string carrying an XSS attempt must at minimum break out of the JSON
+        // string literal: embedded quotes/backslashes/control chars are escaped,
+        // so the serialized value cannot terminate the string and inject tokens.
+        let j = Json::build(vec![("name", Json::str("<script>alert('xss')</script>\"owned\""))]);
+        let out = j.to_string();
+        // Embedded double quote -> escaped, cannot close the JSON string.
+        assert!(out.contains("\\\"owned\\\""), "embedded quotes must be escaped: {}", out);
+        // A raw newline inside a string would break literal output; it must be \\n.
+        let j2 = Json::str("line1\nline2");
+        assert!(j2.to_string().contains("\\n"));
+    }
+
+    #[test]
+    fn deep_and_large_structures_roundtrip() {
+        let inner = Json::build(vec![("v", Json::num(1.0))]);
+        let mut cur = inner;
+        for _ in 0..5 {
+            cur = Json::build(vec![("nested", cur)]);
+        }
+        let back = parse(&cur.to_string()).unwrap();
+        assert_eq!(back, cur);
+
+        let arr = Json::arr((0..100).map(|i| Json::num(i as f64)).collect());
+        assert_eq!(arr.as_arr().unwrap().len(), 100);
+    }
 }
