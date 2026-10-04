@@ -126,3 +126,15 @@ pilseocore mcp --token <签发token>
 - **作者**:yxpil(笔名,可能非本人真实姓名)。保留作者署名权——使用、修改、分发(含商用)须保留作者声明。
 - **协议全文**:见 [LICENSE](LICENSE)。核心条款:必须保留作者署名,删除/篡改作者声明视为违反协议;软件按"现状"提供,作者不对使用产生的损失负责;二次分发须附 LICENSE 原文并注明修改者。
 - 本项目为纯 Rust 标准库实现,零第三方依赖。
+
+---
+
+<div align="center">
+
+<a href="https://github.com/yxpil/PILSEOCORE">
+  <img width="100%" src="https://alittlecatgirlpanel.yxp.hk/card?repo=yxpil/PILSEOCORE" alt="gh-card · yxpil/PILSEOCORE" />
+</a>
+
+<sub>Powered by <a href="https://alittlecatgirlpanel.yxp.hk"><b>gh-card</b></a> · 粉色手写体 README 仓库名片</sub>
+
+</div>
